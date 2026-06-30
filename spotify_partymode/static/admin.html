@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#121212" />
+  <title>Partymode — Admin</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <!-- Local admin login -->
+  <section id="login" class="screen center hidden">
+    <div class="card">
+      <h1 class="logo">Admin login</h1>
+      <form id="login-form">
+        <label class="field">Username
+          <input id="login-user" type="text" autocomplete="username" required />
+        </label>
+        <label class="field">Password
+          <input id="login-pass" type="password" autocomplete="current-password" required />
+        </label>
+        <button type="submit" class="btn primary" style="width:100%">Log in</button>
+      </form>
+      <a class="admin-link" href="/register.html">Create an account</a>
+      <a class="admin-link" href="/">Back to guest view</a>
+    </div>
+  </section>
+
+  <!-- Admin panel -->
+  <section id="admin" class="screen hidden">
+    <header class="topbar">
+      <h1 class="logo small">Party<span>mode</span> · Admin</h1>
+      <div class="who">
+        <a class="btn ghost small" href="/">Guest view</a>
+        <button id="logout" class="btn ghost small">Logout</button>
+      </div>
+    </header>
+
+    <!-- Spotify connection -->
+    <div class="card">
+      <div class="row between">
+        <div>
+          <h2>Spotify connection</h2>
+          <p id="spotify-status" class="muted small">Checking…</p>
+        </div>
+        <div class="actions">
+          <a id="connect-btn" class="btn primary small" href="/auth/spotify/login">Connect</a>
+          <button id="disconnect-btn" class="btn ghost small hidden">Disconnect</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Party mode -->
+    <div class="card">
+      <div class="row between">
+        <div>
+          <h2>Party mode</h2>
+          <p class="muted small">When off, guests cannot add new songs.</p>
+        </div>
+        <label class="switch">
+          <input id="party-toggle" type="checkbox" />
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Playlist -->
+    <div class="card">
+      <h2>Fixed playlist</h2>
+      <p class="muted small">Spotify playlist URL, URI or ID. Keeps playing between wishes.</p>
+      <form id="playlist-form" class="search-row">
+        <input id="playlist-input" type="text" placeholder="spotify:playlist:... or id" />
+        <button type="submit" class="btn primary small">Save</button>
+      </form>
+      <div class="row">
+        <button id="start-btn" class="btn primary small">Start playlist</button>
+        <button id="skip-btn" class="btn ghost small">Skip current</button>
+      </div>
+    </div>
+
+    <!-- Now playing -->
+    <div class="now-playing card">
+      <div class="np-label">Now playing</div>
+      <div id="now-playing" class="track big">
+        <img class="cover" src="" alt="" />
+        <div class="meta"><div class="title">—</div><div class="sub muted"></div></div>
+      </div>
+    </div>
+
+    <!-- Wish queue -->
+    <div class="card">
+      <h2>Wish queue</h2>
+      <p class="muted small">Use the arrows to reorder pending wishes, ✕ to reject.</p>
+      <ul id="wish-admin" class="track-list"></ul>
+      <p id="wish-empty" class="muted small">No wishes pending.</p>
+    </div>
+
+    <!-- Session control -->
+    <div class="card">
+      <div class="row between">
+        <h2>Session control</h2>
+        <span id="session-status" class="muted small"></span>
+      </div>
+      <p class="muted small">Starting a party records history and turns party mode on. Ending it turns party mode off.</p>
+      <form id="session-form" class="search-row">
+        <input id="session-name" type="text" placeholder="Party name (optional)" />
+        <button type="submit" class="btn primary small">Start party</button>
+      </form>
+      <div class="row">
+        <button id="end-session" class="btn ghost small">End party</button>
+      </div>
+    </div>
+
+    <!-- History (view by session) -->
+    <div class="card">
+      <div class="row between">
+        <h2>History</h2>
+        <select id="session-select"></select>
+      </div>
+
+      <h3 class="sub-head">Played (play history)</h3>
+      <ul id="play-history" class="track-list compact"></ul>
+      <p id="play-empty" class="muted small">Nothing played yet.</p>
+      <button id="clear-play-history" class="btn ghost small">Clear play history</button>
+
+      <h3 class="sub-head">Wishes</h3>
+      <ul id="history" class="track-list compact"></ul>
+      <p id="history-empty" class="muted small">No wishes yet.</p>
+      <button id="clear-history" class="btn ghost small">Clear wish history</button>
+    </div>
+
+    <!-- Blacklist -->
+    <div class="card">
+      <h2>Blacklist</h2>
+      <form id="blacklist-form" class="search-row">
+        <select id="bl-kind">
+          <option value="artist">Artist</option>
+          <option value="track">Track</option>
+        </select>
+        <input id="bl-id" type="text" placeholder="Spotify ID" />
+        <input id="bl-name" type="text" placeholder="Name (label)" />
+        <button type="submit" class="btn primary small">Block</button>
+      </form>
+      <ul id="blacklist" class="track-list compact"></ul>
+    </div>
+
+    <!-- Accounts / Users -->
+    <div class="card">
+      <div class="row between">
+        <div>
+          <h2>Accounts</h2>
+          <p class="muted small">Manager accounts (can open the admin panel). Guests just use a name.</p>
+        </div>
+        <label class="switch" title="Open self-registration">
+          <input id="reg-toggle" type="checkbox" />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <p class="muted small" id="reg-label">Self-registration: …</p>
+
+      <form id="user-form" class="search-row">
+        <input id="user-name" type="text" placeholder="Username" autocomplete="off" />
+        <input id="user-pass" type="password" placeholder="Password" autocomplete="new-password" />
+        <button type="submit" class="btn primary small">Add</button>
+      </form>
+      <ul id="user-list" class="track-list compact"></ul>
+    </div>
+
+    <!-- Settings -->
+    <div class="card">
+      <h2>Settings</h2>
+      <form id="settings-form">
+        <label class="field">Spotify Client ID
+          <input id="set-client-id" type="text" autocomplete="off" />
+        </label>
+        <label class="field">Spotify Client Secret <span id="secret-hint" class="muted"></span>
+          <input id="set-client-secret" type="password" autocomplete="off" placeholder="leave empty to keep" />
+        </label>
+        <label class="field">Redirect URI
+          <input id="set-redirect" type="text" />
+        </label>
+        <label class="field">Poll interval (seconds)
+          <input id="set-poll" type="number" min="2" />
+        </label>
+        <label class="field">Insert wish before track end (seconds)
+          <input id="set-lead" type="number" min="6" />
+        </label>
+        <button type="submit" class="btn primary small">Save settings</button>
+      </form>
+    </div>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/static/js/admin.js"></script>
+</body>
+</html>

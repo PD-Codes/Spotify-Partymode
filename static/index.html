@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#121212" />
+  <title>Spotify Partymode</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <!-- Guest login screen -->
+  <section id="login" class="screen center">
+    <div class="card">
+      <h1 class="logo">Party<span>mode</span></h1>
+      <p class="muted">Enter your name to start adding songs.</p>
+      <form id="login-form">
+        <input id="name-input" type="text" placeholder="Your name" maxlength="40" autocomplete="off" required />
+        <button type="submit" class="btn primary">Join the party</button>
+      </form>
+      <a class="admin-link" href="/admin.html">Admin login</a>
+    </div>
+  </section>
+
+  <!-- Main guest app -->
+  <section id="app" class="screen hidden">
+    <header class="topbar">
+      <h1 class="logo small">Party<span>mode</span></h1>
+      <div class="who">
+        <span id="who-name"></span>
+        <button id="logout" class="btn ghost small">Leave</button>
+      </div>
+    </header>
+
+    <div id="party-off-banner" class="banner hidden">Party mode is currently off.</div>
+
+    <div class="now-playing card">
+      <div class="np-label">Now playing</div>
+      <div id="now-playing" class="track big">
+        <img class="cover" src="" alt="" />
+        <div class="meta"><div class="title">—</div><div class="sub muted"></div></div>
+      </div>
+    </div>
+
+    <!-- Search & add -->
+    <div class="card">
+      <form id="search-form" class="search-row">
+        <input id="search-input" type="search" placeholder="Search for a song..." autocomplete="off" />
+        <button type="submit" class="btn primary small">Search</button>
+      </form>
+      <ul id="search-results" class="track-list"></ul>
+    </div>
+
+    <!-- Wish queue -->
+    <div class="card">
+      <h2>Up next (wishes)</h2>
+      <ul id="wish-queue" class="track-list"></ul>
+      <p id="wish-empty" class="muted small">No wishes yet — be the first!</p>
+    </div>
+
+    <!-- Playlist continuation -->
+    <div class="card">
+      <h2>Then the playlist</h2>
+      <ul id="upcoming" class="track-list compact"></ul>
+    </div>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/static/js/guest.js"></script>
+</body>
+</html>

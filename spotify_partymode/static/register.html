@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#121212" />
+  <title>Partymode — Register</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <section class="screen center">
+    <div class="card">
+      <h1 class="logo">Create account</h1>
+      <p class="muted small">For party hosts/managers. Guests just join with a name.</p>
+
+      <form id="register-form">
+        <label class="field">Username
+          <input id="username" type="text" minlength="3" autocomplete="username" required />
+        </label>
+        <label class="field">Password
+          <input id="password" type="password" minlength="6" autocomplete="new-password" required />
+        </label>
+        <button type="submit" class="btn primary" style="width:100%">Register</button>
+      </form>
+
+      <div id="closed" class="banner hidden" style="margin-top:14px">
+        Registration is currently closed. Ask an admin to create an account for you.
+      </div>
+
+      <a class="admin-link" href="/admin.html">Already have an account? Log in</a>
+    </div>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script>
+    const $ = (s) => document.querySelector(s);
+    async function api(path, options = {}) {
+      const res = await fetch(path, { headers: { "Content-Type": "application/json" }, credentials: "same-origin", ...options });
+      if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.detail || `Failed (${res.status})`); }
+      return res.json();
+    }
+    function toast(m) { const e = $("#toast"); e.textContent = m; e.classList.remove("hidden"); setTimeout(() => e.classList.add("hidden"), 2800); }
+
+    api("/auth/status").then((s) => {
+      if (!s.setup_complete) { location.href = "/setup.html"; return; }
+      if (!s.registration_open) {
+        $("#register-form").classList.add("hidden");
+        $("#closed").classList.remove("hidden");
+      }
+    });
+
+    $("#register-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        await api("/auth/register", {
+          method: "POST",
+          body: JSON.stringify({ username: $("#username").value.trim(), password: $("#password").value }),
+        });
+        toast("Account created");
+        setTimeout(() => (location.href = "/admin.html"), 600);
+      } catch (err) { toast(err.message); }
+    });
+  </script>
+</body>
+</html>

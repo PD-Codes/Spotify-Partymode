@@ -1,0 +1,19 @@
+services:
+  partymode:
+    build: .
+    container_name: spotify-partymode
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Override so the DB lands in the mounted volume.
+      DATABASE_PATH: /data/partymode.db
+      HOST: 0.0.0.0
+      PORT: 8000
+    volumes:
+      - partymode-data:/data
+    restart: unless-stopped
+
+volumes:
+  partymode-data:

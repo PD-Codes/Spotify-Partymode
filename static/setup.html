@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#121212" />
+  <title>Partymode — Setup</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <section id="setup" class="screen">
+    <h1 class="logo">First-time setup</h1>
+    <p class="muted">Create the admin account. Spotify can be connected now or later.</p>
+
+    <form id="setup-form">
+      <div class="card">
+        <h2>Admin account</h2>
+        <label class="field">Username
+          <input id="username" type="text" minlength="3" autocomplete="username" required />
+        </label>
+        <label class="field">Password
+          <input id="password" type="password" minlength="6" autocomplete="new-password" required />
+        </label>
+        <p class="muted small">Used to log in and manage the party. Works without Spotify.</p>
+      </div>
+
+      <div class="card">
+        <h2>Spotify (optional)</h2>
+        <p class="muted small">
+          From your app at
+          <span class="mono">developer.spotify.com/dashboard</span>.
+          You can also fill this in later under admin settings.
+        </p>
+        <label class="field">Client ID
+          <input id="client-id" type="text" autocomplete="off" />
+        </label>
+        <label class="field">Client Secret
+          <input id="client-secret" type="password" autocomplete="off" />
+        </label>
+        <label class="field">Redirect URI
+          <input id="redirect-uri" type="text" value="http://127.0.0.1:8000/auth/callback" />
+        </label>
+        <label class="field">Default playlist (optional)
+          <input id="playlist" type="text" placeholder="spotify:playlist:... or id" />
+        </label>
+      </div>
+
+      <button type="submit" class="btn primary" style="width:100%">Create admin & continue</button>
+    </form>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script>
+    const $ = (s) => document.querySelector(s);
+    async function api(path, options = {}) {
+      const res = await fetch(path, { headers: { "Content-Type": "application/json" }, credentials: "same-origin", ...options });
+      if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.detail || `Failed (${res.status})`); }
+      return res.json();
+    }
+    function toast(m) { const e = $("#toast"); e.textContent = m; e.classList.remove("hidden"); setTimeout(() => e.classList.add("hidden"), 2800); }
+
+    // If setup is already done, leave this page.
+    api("/auth/status").then((s) => { if (s.setup_complete) location.href = "/admin.html"; });
+
+    $("#setup-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const body = {
+        username: $("#username").value.trim(),
+        password: $("#password").value,
+        spotify_client_id: $("#client-id").value.trim(),
+        spotify_client_secret: $("#client-secret").value.trim(),
+        spotify_redirect_uri: $("#redirect-uri").value.trim(),
+        default_playlist: $("#playlist").value.trim(),
+      };
+      try {
+        await api("/auth/setup", { method: "POST", body: JSON.stringify(body) });
+        location.href = "/admin.html";
+      } catch (err) { toast(err.message); }
+    });
+  </script>
+</body>
+</html>
