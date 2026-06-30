@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -101,7 +101,7 @@ def create_app() -> FastAPI:
 
     @app.get("/favicon.ico")
     async def favicon():
-        return JSONResponse({}, status_code=204)
+        return Response(status_code=204)
 
     return app
 
