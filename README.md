@@ -39,7 +39,7 @@ the UI can show **who added** each song.
 ## Setup (pip)
 
 ```bash
-pip install -r requirements.txt
+pip install .
 python -m spotify_partymode
 ```
 
