@@ -26,7 +26,9 @@ _DEFAULTS = {
     SPOTIFY_REDIRECT_URI: "http://127.0.0.1:8000/auth/callback",
     DEFAULT_PLAYLIST: "",
     POLL_INTERVAL: 4,
-    REGISTRATION_OPEN: True,
+    # Closed by default: self-registered accounts get full manager rights,
+    # so the admin must explicitly opt in to open registration.
+    REGISTRATION_OPEN: False,
     INSERT_LEAD: 20,
 }
 

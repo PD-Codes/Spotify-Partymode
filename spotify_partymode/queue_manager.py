@@ -84,8 +84,14 @@ def _item_image(item: dict) -> str:
 
 
 async def _tick() -> None:
-    """One poller iteration: skip blacklisted tracks, log plays, feed next wish."""
-    if not is_party_on() or not spotify_client.is_admin_authenticated():
+    """One poller iteration: skip blacklisted tracks, log plays, feed next wish.
+
+    All sqlite calls are pushed to a worker thread via asyncio.to_thread so
+    the event loop is never blocked by database I/O.
+    """
+    party_on = await asyncio.to_thread(is_party_on)
+    authed = await asyncio.to_thread(spotify_client.is_admin_authenticated)
+    if not party_on or not authed:
         return
 
     playback = await spotify_client.get_playback()
@@ -100,7 +106,7 @@ async def _tick() -> None:
     progress_ms = playback.get("progress_ms")
 
     # --- blacklist skip (party mode only, which is guaranteed above) ---
-    if track_id and db.is_blacklisted(track_id, artist_ids):
+    if track_id and await asyncio.to_thread(db.is_blacklisted, track_id, artist_ids):
         try:
             await spotify_client.skip_next()
             logger.info("Skipped blacklisted track '%s'", item.get("name"))
@@ -109,54 +115,56 @@ async def _tick() -> None:
         return  # do not log or feed on a blacklisted track
 
     # --- play-history logging (only with an active session) ---
-    session_id = db.current_session_id()
-    if session_id and current_uri and db.kv_get(KEY_LAST_PLAYED) != current_uri:
-        wish = db.get_wish_by_uri(session_id, current_uri)
-        db.add_play(
+    session_id = await asyncio.to_thread(db.current_session_id)
+    last_played = await asyncio.to_thread(db.kv_get, KEY_LAST_PLAYED)
+    if session_id and current_uri and last_played != current_uri:
+        wish = await asyncio.to_thread(db.get_wish_by_uri, session_id, current_uri)
+        await asyncio.to_thread(
+            db.add_play,
             session_id,
             {"uri": current_uri, "name": item.get("name", ""),
              "artist": _item_artist(item), "image_url": _item_image(item)},
-            source="wish" if wish else "playlist",
-            added_by=wish["added_by"] if wish else None,
+            "wish" if wish else "playlist",
+            wish["added_by"] if wish else None,
         )
-        db.kv_set(KEY_LAST_PLAYED, current_uri)
+        await asyncio.to_thread(db.kv_set, KEY_LAST_PLAYED, current_uri)
 
     # --- display cleanup: mark a queued wish as played once the track moves on ---
-    current_wish = db.kv_get(KEY_CURRENT_WISH)
+    current_wish = await asyncio.to_thread(db.kv_get, KEY_CURRENT_WISH)
     if current_wish and current_uri != current_wish.get("uri"):
-        db.set_wish_status(current_wish["id"], "played")
-        db.kv_set(KEY_CURRENT_WISH, None)
+        await asyncio.to_thread(db.set_wish_status, current_wish["id"], "played")
+        await asyncio.to_thread(db.kv_set, KEY_CURRENT_WISH, None)
         current_wish = None
     if current_wish is None and current_uri:
-        for w in db.list_wishes(("queued",)):
+        for w in await asyncio.to_thread(db.list_wishes, ("queued",)):
             if w["track_uri"] == current_uri:
-                db.kv_set(KEY_CURRENT_WISH, {"id": w["id"], "uri": current_uri})
+                await asyncio.to_thread(db.kv_set, KEY_CURRENT_WISH, {"id": w["id"], "uri": current_uri})
                 break
 
     # --- timed feeding of the next pending wish ---
     if current_uri is None or duration_ms is None or progress_ms is None:
         return  # local file / ad / unknown timing -> skip this tick safely
     remaining_ms = duration_ms - progress_ms
-    lead_ms = settings_store.get_insert_lead() * 1000
+    lead_ms = await asyncio.to_thread(settings_store.get_insert_lead) * 1000
 
-    marker = db.kv_get(KEY_FEED_MARKER) or {"uri": None, "fed": False}
+    marker = await asyncio.to_thread(db.kv_get, KEY_FEED_MARKER) or {"uri": None, "fed": False}
     if marker.get("uri") != current_uri:
         marker = {"uri": current_uri, "fed": False}  # new track instance
 
     if not marker["fed"] and 0 < remaining_ms <= lead_ms:
-        nxt = db.next_pending_wish()
+        nxt = await asyncio.to_thread(db.next_pending_wish)
         if nxt is not None:
             try:
                 await spotify_client.add_to_queue(nxt["track_uri"])
             except Exception:  # noqa: BLE001 - log and retry next tick (don't mark fed)
                 logger.exception("Failed to push wish %s to Spotify queue", nxt["id"])
-                db.kv_set(KEY_FEED_MARKER, marker)
+                await asyncio.to_thread(db.kv_set, KEY_FEED_MARKER, marker)
                 return
-            db.set_wish_status(nxt["id"], "queued")
+            await asyncio.to_thread(db.set_wish_status, nxt["id"], "queued")
             marker["fed"] = True
             logger.info("Fed wish '%s' (%.0fs before end)", nxt["track_name"], remaining_ms / 1000)
 
-    db.kv_set(KEY_FEED_MARKER, marker)
+    await asyncio.to_thread(db.kv_set, KEY_FEED_MARKER, marker)
 
 
 async def run_poller(stop_event: asyncio.Event) -> None:

@@ -18,6 +18,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from .. import db, queue_manager, security, settings_store, spotify_client
+from . import deps
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -25,7 +26,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # --- status ------------------------------------------------------------------
 
 @router.get("/status")
-async def status_(request: Request) -> dict:
+def status_(request: Request) -> dict:
     """Report setup/identity state so the frontend can route the user."""
     return {
         "setup_complete": db.admin_exists(),
@@ -49,9 +50,11 @@ class SetupBody(BaseModel):
 
 
 @router.post("/setup")
-async def setup(body: SetupBody, request: Request) -> dict:
+def setup(body: SetupBody, request: Request) -> dict:
     """Create the local admin account and store initial settings. One-time only."""
+    deps.check_rate_limit(request, "setup")
     if db.admin_exists():
+        deps.record_failed_attempt(request, "setup")
         raise HTTPException(status.HTTP_409_CONFLICT, "Setup has already been completed.")
     username = body.username.strip()
     if len(username) < 3 or len(body.password) < 6:
@@ -75,6 +78,7 @@ async def setup(body: SetupBody, request: Request) -> dict:
     request.session["is_admin"] = True
     request.session["guest_name"] = username
     request.session["admin_username"] = username
+    deps.stamp_admin_session(request)
     return {"ok": True}
 
 
@@ -86,14 +90,18 @@ class AdminLogin(BaseModel):
 
 
 @router.post("/admin/login")
-async def admin_login(body: AdminLogin, request: Request) -> dict:
+def admin_login(body: AdminLogin, request: Request) -> dict:
     """Log in with the local admin username/password (no Spotify required)."""
+    deps.check_rate_limit(request, "admin_login")
     admin = db.get_admin_by_username(body.username.strip())
     if not admin or not security.verify_password(body.password, admin["password_hash"]):
+        deps.record_failed_attempt(request, "admin_login")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid username or password.")
+    deps.reset_rate_limit(request, "admin_login")
     request.session["is_admin"] = True
     request.session["guest_name"] = admin["username"]
     request.session["admin_username"] = admin["username"]
+    deps.stamp_admin_session(request)
     return {"ok": True, "spotify_connected": spotify_client.is_admin_authenticated()}
 
 
@@ -103,8 +111,14 @@ class RegisterBody(BaseModel):
 
 
 @router.post("/register")
-async def register(body: RegisterBody, request: Request) -> dict:
-    """Public self-registration of a manager account. Gated by the open flag."""
+def register(body: RegisterBody, request: Request) -> dict:
+    """Public self-registration of a manager account. Gated by the open flag.
+
+    SECURITY NOTE: there is only one account role, so every self-registered
+    user gets full manager/admin rights. Because of that, registration is
+    CLOSED by default and must be explicitly enabled by the admin (who should
+    only do so in a trusted environment).
+    """
     if not db.admin_exists():
         raise HTTPException(status.HTTP_409_CONFLICT, "Initial setup is not complete yet.")
     if not settings_store.is_registration_open():
@@ -121,6 +135,7 @@ async def register(body: RegisterBody, request: Request) -> dict:
     request.session["is_admin"] = True
     request.session["guest_name"] = username
     request.session["admin_username"] = username
+    deps.stamp_admin_session(request)
     return {"ok": True}
 
 
@@ -131,7 +146,7 @@ class GuestLogin(BaseModel):
 
 
 @router.post("/guest")
-async def guest_login(body: GuestLogin, request: Request) -> dict:
+def guest_login(body: GuestLogin, request: Request) -> dict:
     """Log in as a guest by providing a display name (only while the party runs).
 
     The name is kept in the signed session cookie, so guests stay logged in
@@ -155,7 +170,7 @@ _OAUTH_STATE_TTL = 600  # seconds a pending OAuth state stays valid
 
 
 @router.get("/spotify/login")
-async def spotify_login(request: Request):
+def spotify_login(request: Request):
     """Start the Spotify OAuth flow to link Spotify to the admin account."""
     if not request.session.get("is_admin"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin login required.")
@@ -164,11 +179,17 @@ async def spotify_login(request: Request):
             status.HTTP_400_BAD_REQUEST,
             "Spotify credentials are not configured yet. Add them in settings first.",
         )
-    # Store the CSRF state server-side (DB) instead of in the session cookie, so
-    # the callback works even if it lands on a different host (e.g. 127.0.0.1 vs
-    # localhost) where the session cookie would not be sent.
+    # Store the CSRF state server-side (DB) and bind the flow to the initiating
+    # browser session via a nonce kept in the session cookie. The callback must
+    # present both the valid single-use state AND the matching session nonce
+    # before it is allowed to (re-)establish an admin session.
     state = secrets.token_urlsafe(16)
-    db.kv_set(f"oauth_state:{state}", {"created": time.time(), "by": request.session.get("admin_username")})
+    nonce = secrets.token_urlsafe(16)
+    request.session["oauth_nonce"] = nonce
+    db.kv_set(
+        f"oauth_state:{state}",
+        {"created": time.time(), "by": request.session.get("admin_username"), "nonce": nonce},
+    )
     return RedirectResponse(spotify_client.build_authorize_url(state))
 
 
@@ -183,18 +204,28 @@ async def spotify_callback(request: Request, code: str = "", state: str = "", er
     db.kv_set(f"oauth_state:{state}", None)  # single-use
     if time.time() - pending.get("created", 0) > _OAUTH_STATE_TTL:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "OAuth state expired. Please try connecting again.")
+    # The callback must arrive in the same browser session that started the
+    # flow (nonce match) - otherwise a leaked/forwarded callback URL could be
+    # used to obtain an admin session.
+    session_nonce = request.session.pop("oauth_nonce", None)
+    if not session_nonce or session_nonce != pending.get("nonce"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "OAuth callback did not originate from this session. Please try connecting again.",
+        )
     await spotify_client.exchange_code(code)
     # Re-establish the admin session on the callback host (the flow was started
-    # by an authenticated admin, proven by the valid single-use state).
+    # by an authenticated admin, proven by state + session nonce).
     request.session["is_admin"] = True
     request.session.setdefault("guest_name", pending.get("by") or "Admin")
     if pending.get("by"):
         request.session["admin_username"] = pending["by"]
+    deps.stamp_admin_session(request)
     return RedirectResponse("/admin.html")
 
 
 @router.post("/spotify/disconnect")
-async def spotify_disconnect(request: Request) -> dict:
+def spotify_disconnect(request: Request) -> dict:
     """Unlink Spotify from the admin account."""
     if not request.session.get("is_admin"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin login required.")
@@ -203,14 +234,14 @@ async def spotify_disconnect(request: Request) -> dict:
 
 
 @router.post("/logout")
-async def logout(request: Request) -> dict:
+def logout(request: Request) -> dict:
     """Clear the current session (guest or admin)."""
     request.session.clear()
     return {"ok": True}
 
 
 @router.get("/me")
-async def whoami(request: Request) -> dict:
+def whoami(request: Request) -> dict:
     """Return the current identity for the frontend to adapt its UI."""
     return {
         "guest_name": request.session.get("guest_name"),

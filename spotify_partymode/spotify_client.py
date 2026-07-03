@@ -6,7 +6,9 @@ are persisted in the kv store and refreshed automatically when they expire.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import logging
 import time
 import urllib.parse
 from typing import Any, Optional
@@ -21,6 +23,12 @@ _TOKEN_URL = "https://accounts.spotify.com/api/token"
 _API_BASE = "https://api.spotify.com/v1"
 
 _TOKEN_KEY = "spotify_token"  # kv key holding the token dict
+
+logger = logging.getLogger("partymode.spotify")
+
+# Serializes token refreshes so concurrent requests cannot race each other
+# (Spotify may rotate the refresh token, so a lost race can invalidate it).
+_refresh_lock = asyncio.Lock()
 
 
 def build_authorize_url(state: str) -> str:
@@ -61,18 +69,37 @@ async def exchange_code(code: str) -> None:
 
 
 async def _refresh_token(token: dict) -> dict:
-    """Refresh an expired access token using the stored refresh token."""
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            _TOKEN_URL,
-            headers=_basic_auth_header(),
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": token["refresh_token"],
-            },
+    """Refresh an expired access token using the stored refresh token.
+
+    On an unusable/rejected refresh token the stored token is cleared and a
+    PermissionError is raised so the admin knows Spotify must be re-linked.
+    """
+    refresh = token.get("refresh_token")
+    if not refresh:
+        # Without a refresh token the stored token is useless once expired.
+        db.kv_set(_TOKEN_KEY, None)
+        logger.error("Stored Spotify token has no refresh_token; cleared. Re-link Spotify.")
+        raise PermissionError("Spotify token is missing a refresh token. Please re-link Spotify.")
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                _TOKEN_URL,
+                headers=_basic_auth_header(),
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh,
+                },
+            )
+            resp.raise_for_status()
+            new = resp.json()
+    except httpx.HTTPStatusError as exc:
+        # Refresh token revoked/invalid: clear it so the UI shows "not connected".
+        db.kv_set(_TOKEN_KEY, None)
+        logger.error(
+            "Spotify token refresh failed (%s); cleared stored token. Re-link Spotify.",
+            exc.response.status_code,
         )
-        resp.raise_for_status()
-        new = resp.json()
+        raise PermissionError("Spotify token refresh failed. Please re-link Spotify.") from exc
     # Spotify may not return a new refresh token; keep the old one if missing.
     token["access_token"] = new["access_token"]
     token["expires_at"] = time.time() + new.get("expires_in", 3600)
@@ -88,7 +115,13 @@ async def _valid_access_token() -> Optional[str]:
     if not token:
         return None
     if token.get("expires_at", 0) <= time.time() + 30:
-        token = await _refresh_token(token)
+        async with _refresh_lock:
+            # Re-read: another task may have refreshed while we waited.
+            token = db.kv_get(_TOKEN_KEY)
+            if not token:
+                return None
+            if token.get("expires_at", 0) <= time.time() + 30:
+                token = await _refresh_token(token)
     return token["access_token"]
 
 

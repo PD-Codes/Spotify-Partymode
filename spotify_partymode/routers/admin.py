@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
 
 from .. import db, queue_manager, security, settings_store, spotify_client
+from . import deps
 from .deps import AdminGuard
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[AdminGuard])
@@ -14,7 +15,7 @@ router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[AdminGuard
 # --- settings ----------------------------------------------------------------
 
 @router.get("/settings")
-async def get_settings() -> dict:
+def get_settings() -> dict:
     """Return current settings. The client secret is masked, never sent back."""
     cid, secret, redirect = settings_store.get_spotify_credentials()
     return {
@@ -40,7 +41,7 @@ class SettingsBody(BaseModel):
 
 
 @router.post("/settings")
-async def update_settings(body: SettingsBody) -> dict:
+def update_settings(body: SettingsBody) -> dict:
     """Update settings. Empty/None fields are left unchanged."""
     if body.spotify_client_id is not None:
         settings_store.set(settings_store.SPOTIFY_CLIENT_ID, body.spotify_client_id.strip())
@@ -62,7 +63,7 @@ async def update_settings(body: SettingsBody) -> dict:
 # --- user / account management -----------------------------------------------
 
 @router.get("/users")
-async def list_users() -> dict:
+def list_users() -> dict:
     """List all manager accounts."""
     return {"users": db.list_admins()}
 
@@ -73,7 +74,7 @@ class NewUser(BaseModel):
 
 
 @router.post("/users")
-async def create_user(body: NewUser) -> dict:
+def create_user(body: NewUser) -> dict:
     """Create a new manager account (admin-initiated)."""
     username = body.username.strip()
     if len(username) < 3 or len(body.password) < 6:
@@ -87,7 +88,7 @@ async def create_user(body: NewUser) -> dict:
 
 
 @router.delete("/users/{user_id}")
-async def delete_user(user_id: int, request: Request) -> dict:
+def delete_user(user_id: int, request: Request) -> dict:
     """Delete a manager account. Cannot delete yourself or the last account."""
     target = db.get_admin_by_id(user_id)
     if not target:
@@ -97,6 +98,9 @@ async def delete_user(user_id: int, request: Request) -> dict:
     if db.count_admins() <= 1:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot delete the last account.")
     db.delete_admin(user_id)
+    # Invalidate all admin sessions so the deleted account is logged out.
+    deps.bump_session_generation()
+    deps.stamp_admin_session(request)
     return {"ok": True}
 
 
@@ -107,14 +111,24 @@ class PasswordBody(BaseModel):
 
 
 @router.post("/password")
-async def change_password(body: PasswordBody) -> dict:
-    """Change the local admin password."""
-    admin = db.get_admin_by_username(body.username.strip())
+def change_password(body: PasswordBody, request: Request) -> dict:
+    """Change the local admin password (only for the logged-in account)."""
+    deps.check_rate_limit(request, "change_password")
+    username = body.username.strip()
+    # Only allow changing the password of the account owning this session.
+    if username != request.session.get("admin_username"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only change your own password.")
+    admin = db.get_admin_by_username(username)
     if not admin or not security.verify_password(body.current_password, admin["password_hash"]):
+        deps.record_failed_attempt(request, "change_password")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Current credentials are invalid.")
     if len(body.new_password) < 6:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "New password must be >= 6 chars.")
     db.update_admin_password(admin["id"], security.hash_password(body.new_password))
+    deps.reset_rate_limit(request, "change_password")
+    # Invalidate all existing admin sessions, then re-stamp the current one.
+    deps.bump_session_generation()
+    deps.stamp_admin_session(request)
     return {"ok": True}
 
 
@@ -123,7 +137,7 @@ class PartyToggle(BaseModel):
 
 
 @router.post("/party")
-async def toggle_party(body: PartyToggle) -> dict:
+def toggle_party(body: PartyToggle) -> dict:
     """Turn party mode on or off."""
     queue_manager.set_party_on(body.on)
     return {"ok": True, "party_on": body.on}
@@ -165,7 +179,7 @@ class ReorderBody(BaseModel):
 
 
 @router.post("/reorder")
-async def reorder(body: ReorderBody) -> dict:
+def reorder(body: ReorderBody) -> dict:
     """Reorder the pending wish queue. Already-queued songs cannot be moved."""
     db.reorder_wishes(body.ids)
     return {"ok": True}
@@ -176,21 +190,21 @@ class WishIdBody(BaseModel):
 
 
 @router.post("/reject")
-async def reject(body: WishIdBody) -> dict:
+def reject(body: WishIdBody) -> dict:
     """Reject a pending wish. (Songs already pushed to Spotify can only be skipped.)"""
     db.set_wish_status(body.wish_id, "rejected")
     return {"ok": True}
 
 
 @router.post("/history/clear")
-async def clear_history() -> dict:
+def clear_history() -> dict:
     """Clear the current session's wish history (keeps the active queue)."""
     db.clear_history()
     return {"ok": True}
 
 
 @router.delete("/history/{wish_id}")
-async def remove_history_entry(wish_id: int) -> dict:
+def remove_history_entry(wish_id: int) -> dict:
     """Remove a single entry from the wish history."""
     db.delete_wish(wish_id)
     return {"ok": True}
@@ -203,7 +217,7 @@ class SessionStart(BaseModel):
 
 
 @router.post("/sessions/start")
-async def start_session(body: SessionStart) -> dict:
+def start_session(body: SessionStart) -> dict:
     """Start a new party session. Also turns party mode on (coupled)."""
     import time as _time
 
@@ -214,7 +228,7 @@ async def start_session(body: SessionStart) -> dict:
 
 
 @router.post("/sessions/end")
-async def end_session() -> dict:
+def end_session() -> dict:
     """End the current session. Also turns party mode off (coupled)."""
     db.end_session()
     queue_manager.set_party_on(False)
@@ -222,12 +236,12 @@ async def end_session() -> dict:
 
 
 @router.get("/sessions")
-async def list_sessions() -> dict:
+def list_sessions() -> dict:
     return {"sessions": db.list_sessions()}
 
 
 @router.get("/sessions/{session_id}/history")
-async def session_wish_history(session_id: int) -> dict:
+def session_wish_history(session_id: int) -> dict:
     return {
         "history": [
             {
@@ -245,7 +259,7 @@ async def session_wish_history(session_id: int) -> dict:
 
 
 @router.get("/sessions/{session_id}/play-history")
-async def session_play_history(session_id: int) -> dict:
+def session_play_history(session_id: int) -> dict:
     return {
         "history": [
             {
@@ -263,20 +277,20 @@ async def session_play_history(session_id: int) -> dict:
 
 
 @router.post("/play-history/clear")
-async def clear_play_history() -> dict:
+def clear_play_history() -> dict:
     """Clear the current session's play history."""
     db.clear_play_history(db.current_session_id())
     return {"ok": True}
 
 
 @router.delete("/play-history/{entry_id}")
-async def remove_play_entry(entry_id: int) -> dict:
+def remove_play_entry(entry_id: int) -> dict:
     db.delete_play_entry(entry_id)
     return {"ok": True}
 
 
 @router.get("/blacklist")
-async def get_blacklist() -> dict:
+def get_blacklist() -> dict:
     return {"items": db.list_blacklist()}
 
 
@@ -287,7 +301,7 @@ class BlacklistBody(BaseModel):
 
 
 @router.post("/blacklist")
-async def add_to_blacklist(body: BlacklistBody) -> dict:
+def add_to_blacklist(body: BlacklistBody) -> dict:
     if body.kind not in ("artist", "track"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "kind must be 'artist' or 'track'.")
     db.add_blacklist(body.kind, body.spotify_id, body.name)
@@ -295,6 +309,6 @@ async def add_to_blacklist(body: BlacklistBody) -> dict:
 
 
 @router.delete("/blacklist/{entry_id}")
-async def delete_blacklist(entry_id: int) -> dict:
+def delete_blacklist(entry_id: int) -> dict:
     db.remove_blacklist(entry_id)
     return {"ok": True}
