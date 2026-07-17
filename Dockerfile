@@ -6,13 +6,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install dependencies first for better layer caching.
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the application (static files now live inside the package).
+# Kopiere die Projektdatei und den Source-Code
 COPY pyproject.toml ./
 COPY spotify_partymode ./spotify_partymode
+
+# Installiere das Paket und alle Abhängigkeiten direkt aus der pyproject.toml
+RUN pip install --no-cache-dir .
 
 EXPOSE 8000
 
