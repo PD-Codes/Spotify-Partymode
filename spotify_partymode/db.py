@@ -1,9 +1,11 @@
 """SQLite persistence layer.
 
 Tables:
-  kv        - simple key/value store (admin token, party state, active playlist).
-  blacklist - blocked artists or tracks.
-  wish      - the app-managed wish queue with "who added" metadata.
+  kv         - simple key/value store (admin token, party state, active playlist).
+  blacklist  - admin-blocked artists or tracks.
+  wish       - the app-managed wish queue with "who added" metadata.
+  guest_token_usage - per-guest skip-token consumption, bucketed per hour.
+  guest_block       - per-guest artist/track blocks, scoped to a party session.
 """
 
 from __future__ import annotations
@@ -71,6 +73,24 @@ CREATE TABLE IF NOT EXISTS play_history (
     played_at  REAL NOT NULL,
     source     TEXT NOT NULL DEFAULT 'playlist',  -- playlist|wish
     added_by   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS guest_token_usage (
+    guest_name  TEXT NOT NULL,
+    hour_bucket INTEGER NOT NULL,       -- floor(unix_time / 3600)
+    skips_used  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guest_name, hour_bucket)
+);
+
+CREATE TABLE IF NOT EXISTS guest_block (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER,                 -- party scope; NULL = no active session
+    guest_name TEXT NOT NULL,
+    kind       TEXT NOT NULL,           -- 'artist' or 'track'
+    spotify_id TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    UNIQUE (session_id, guest_name, kind, spotify_id)
 );
 """
 
@@ -410,10 +430,23 @@ def list_blacklist() -> list[dict]:
 
 
 def is_blacklisted(track_id: str, artist_ids: list[str]) -> bool:
-    """Return True if the track id or any of its artist ids is blacklisted."""
+    """Return True if the track/artist is blocked (admin blacklist OR guest block).
+
+    Guest blocks are only considered while they belong to the active party
+    session, so they apply to the fixed playlist and everything already in the
+    Spotify queue (the poller re-checks each track that starts playing) and stop
+    mattering once the party ends.
+    """
+    session_id = current_session_id()
     with get_conn() as conn:
         if conn.execute(
             "SELECT 1 FROM blacklist WHERE kind = 'track' AND spotify_id = ?", (track_id,)
+        ).fetchone():
+            return True
+        if track_id and conn.execute(
+            "SELECT 1 FROM guest_block WHERE kind = 'track' AND spotify_id = ? "
+            "AND (session_id = ? OR (session_id IS NULL AND ? IS NULL))",
+            (track_id, session_id, session_id),
         ).fetchone():
             return True
         for aid in artist_ids:
@@ -421,4 +454,106 @@ def is_blacklisted(track_id: str, artist_ids: list[str]) -> bool:
                 "SELECT 1 FROM blacklist WHERE kind = 'artist' AND spotify_id = ?", (aid,)
             ).fetchone():
                 return True
+            if conn.execute(
+                "SELECT 1 FROM guest_block WHERE kind = 'artist' AND spotify_id = ? "
+                "AND (session_id = ? OR (session_id IS NULL AND ? IS NULL))",
+                (aid, session_id, session_id),
+            ).fetchone():
+                return True
     return False
+
+
+# --- guest skip tokens -------------------------------------------------------
+
+def get_guest_skips_used(guest_name: str, hour_bucket: int) -> int:
+    """Return how many skip tokens the guest already spent in this hour bucket."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT skips_used FROM guest_token_usage WHERE guest_name = ? AND hour_bucket = ?",
+            (guest_name, hour_bucket),
+        ).fetchone()
+    return int(row["skips_used"]) if row else 0
+
+
+def incr_guest_skip(guest_name: str, hour_bucket: int) -> int:
+    """Record one spent skip token for the guest in this hour; return new total.
+
+    Old buckets are pruned opportunistically so the table stays small.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM guest_token_usage WHERE hour_bucket < ?", (hour_bucket,)
+        )
+        conn.execute(
+            "INSERT INTO guest_token_usage (guest_name, hour_bucket, skips_used) VALUES (?, ?, 1) "
+            "ON CONFLICT(guest_name, hour_bucket) DO UPDATE SET skips_used = skips_used + 1",
+            (guest_name, hour_bucket),
+        )
+        row = conn.execute(
+            "SELECT skips_used FROM guest_token_usage WHERE guest_name = ? AND hour_bucket = ?",
+            (guest_name, hour_bucket),
+        ).fetchone()
+    return int(row["skips_used"]) if row else 1
+
+
+# --- guest blocks ------------------------------------------------------------
+
+def count_guest_blocks(session_id: Optional[int], guest_name: str, kind: str) -> int:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM guest_block WHERE guest_name = ? AND kind = ? "
+            "AND (session_id = ? OR (session_id IS NULL AND ? IS NULL))",
+            (guest_name, kind, session_id, session_id),
+        ).fetchone()
+    return int(row["c"])
+
+
+def guest_block_exists(session_id: Optional[int], guest_name: str, kind: str, spotify_id: str) -> bool:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT 1 FROM guest_block WHERE guest_name = ? AND kind = ? AND spotify_id = ? "
+            "AND (session_id = ? OR (session_id IS NULL AND ? IS NULL))",
+            (guest_name, kind, spotify_id, session_id, session_id),
+        ).fetchone() is not None
+
+
+def add_guest_block(
+    session_id: Optional[int], guest_name: str, kind: str, spotify_id: str, name: str
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO guest_block (session_id, guest_name, kind, spotify_id, name, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, guest_name, kind, spotify_id, name, time.time()),
+        )
+
+
+def remove_guest_block(block_id: int, guest_name: str) -> None:
+    """Delete a block only if it belongs to the requesting guest."""
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM guest_block WHERE id = ? AND guest_name = ?", (block_id, guest_name)
+        )
+
+
+def list_guest_blocks(session_id: Optional[int], guest_name: str) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM guest_block WHERE guest_name = ? "
+            "AND (session_id = ? OR (session_id IS NULL AND ? IS NULL)) ORDER BY created_at DESC",
+            (guest_name, session_id, session_id),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def active_guest_block_sets(session_id: Optional[int]) -> tuple[set[str], set[str]]:
+    """Return (blocked track ids, blocked artist ids) from all guests this session."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT kind, spotify_id FROM guest_block "
+            "WHERE (session_id = ? OR (session_id IS NULL AND ? IS NULL))",
+            (session_id, session_id),
+        ).fetchall()
+    tracks = {r["spotify_id"] for r in rows if r["kind"] == "track"}
+    artists = {r["spotify_id"] for r in rows if r["kind"] == "artist"}
+    return tracks, artists

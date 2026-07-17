@@ -167,6 +167,24 @@ async def search_tracks(query: str, limit: int = 20) -> list[dict]:
     return [_track_to_dict(i) for i in items]
 
 
+def _artist_to_dict(item: dict) -> dict:
+    """Normalize a Spotify artist object into the shape the app uses."""
+    images = item.get("images", []) or []
+    return {
+        "id": item["id"],
+        "name": item["name"],
+        "uri": item.get("uri", ""),
+        "image_url": images[-1]["url"] if images else "",
+    }
+
+
+async def search_artists(query: str, limit: int = 20) -> list[dict]:
+    resp = await _request("GET", "/search", params={"q": query, "type": "artist", "limit": limit})
+    resp.raise_for_status()
+    items = resp.json().get("artists", {}).get("items", [])
+    return [_artist_to_dict(i) for i in items]
+
+
 async def get_playback() -> Optional[dict]:
     """Return the current playback state, or None if nothing is active."""
     resp = await _request("GET", "/me/player")

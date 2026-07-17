@@ -64,6 +64,19 @@
       </div>
     </div>
 
+    <!-- Guest guide -->
+    <div class="card">
+      <div class="row between">
+        <div>
+          <h2>Guest guide</h2>
+          <p class="muted small">Printable PDF with a QR code and the join address (read from the redirect URI). Opens in a new tab.</p>
+        </div>
+        <div class="actions">
+          <button id="print-guide" class="btn primary small">Print guide</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Playlist -->
     <div class="card">
       <h2>Fixed playlist</h2>
@@ -132,16 +145,19 @@
     <!-- Blacklist -->
     <div class="card">
       <h2>Blacklist</h2>
+      <p class="muted small">Search Spotify and block an artist or track. Blocked items are skipped automatically.</p>
       <form id="blacklist-form" class="search-row">
         <select id="bl-kind">
-          <option value="artist">Artist</option>
           <option value="track">Track</option>
+          <option value="artist">Artist</option>
         </select>
-        <input id="bl-id" type="text" placeholder="Spotify ID" />
-        <input id="bl-name" type="text" placeholder="Name (label)" />
-        <button type="submit" class="btn primary small">Block</button>
+        <input id="bl-search" type="search" placeholder="Search Spotify…" autocomplete="off" />
+        <button type="submit" class="btn primary small">Search</button>
       </form>
+      <ul id="bl-results" class="track-list compact"></ul>
+      <h3 class="sub-head">Blocked</h3>
       <ul id="blacklist" class="track-list compact"></ul>
+      <p id="blacklist-empty" class="muted small">Nothing blocked yet.</p>
     </div>
 
     <!-- Accounts / Users -->
@@ -184,6 +200,15 @@
         </label>
         <label class="field">Insert wish before track end (seconds)
           <input id="set-lead" type="number" min="6" />
+        </label>
+        <label class="field">Skip tokens per guest & hour
+          <input id="set-skip-tokens" type="number" min="0" />
+        </label>
+        <label class="field">Max blocked artists per guest (per party)
+          <input id="set-block-artists" type="number" min="0" />
+        </label>
+        <label class="field">Max blocked tracks per guest (per party)
+          <input id="set-block-tracks" type="number" min="0" />
         </label>
         <button type="submit" class="btn primary small">Save settings</button>
       </form>

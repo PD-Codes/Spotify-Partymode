@@ -176,6 +176,9 @@ async function loadSettings() {
   $("#set-redirect").value = s.spotify_redirect_uri || "";
   $("#set-poll").value = s.poll_interval_seconds || 4;
   $("#set-lead").value = s.insert_lead_seconds || 20;
+  $("#set-skip-tokens").value = s.skip_tokens_per_hour ?? 3;
+  $("#set-block-artists").value = s.guest_block_artists_max ?? 3;
+  $("#set-block-tracks").value = s.guest_block_tracks_max ?? 5;
   $("#secret-hint").textContent = s.spotify_client_secret_set ? "(stored)" : "(not set)";
   if (!$("#playlist-input").value && s.default_playlist) $("#playlist-input").value = s.default_playlist;
   $("#reg-toggle").checked = !!s.registration_open;
@@ -191,6 +194,9 @@ $("#settings-form").addEventListener("submit", async (e) => {
     spotify_redirect_uri: $("#set-redirect").value.trim(),
     poll_interval_seconds: parseInt($("#set-poll").value, 10) || 4,
     insert_lead_seconds: parseInt($("#set-lead").value, 10) || 20,
+    skip_tokens_per_hour: Math.max(0, parseInt($("#set-skip-tokens").value, 10) || 0),
+    guest_block_artists_max: Math.max(0, parseInt($("#set-block-artists").value, 10) || 0),
+    guest_block_tracks_max: Math.max(0, parseInt($("#set-block-tracks").value, 10) || 0),
   };
   try {
     await api("/api/admin/settings", { method: "POST", body: JSON.stringify(body) });
@@ -283,26 +289,63 @@ async function rejectWish(id) {
   catch (err) { toast(err.message); }
 }
 
-// --- blacklist ---
+// --- guest guide (printable PDF) ---
+$("#print-guide").addEventListener("click", () => {
+  // Same-origin GET carries the admin cookie, so the PDF endpoint authorizes.
+  window.open("/api/admin/guide.pdf", "_blank");
+});
+
+// --- blacklist (Spotify search) ---
 $("#blacklist-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const body = { kind: $("#bl-kind").value, spotify_id: $("#bl-id").value.trim(), name: $("#bl-name").value.trim() };
-  if (!body.spotify_id || !body.name) return toast("ID and name required");
+  const kind = $("#bl-kind").value;
+  const q = $("#bl-search").value.trim();
+  if (!q) return;
   try {
-    await api("/api/admin/blacklist", { method: "POST", body: JSON.stringify(body) });
-    $("#bl-id").value = ""; $("#bl-name").value = "";
-    loadBlacklist();
+    const { results } = await api(`/api/admin/search?type=${kind}&q=${encodeURIComponent(q)}`);
+    renderBlacklistResults(kind, results);
   } catch (err) { toast(err.message); }
 });
+
+function renderBlacklistResults(kind, results) {
+  const ul = $("#bl-results");
+  ul.innerHTML = "";
+  results.forEach((r) => {
+    const label = kind === "artist" ? "Artist" : escapeHtml(r.artist || "");
+    const li = document.createElement("li");
+    li.innerHTML = `
+      ${coverImg(r.image_url)}
+      <div class="info">
+        <div class="title">${escapeHtml(r.name)}</div>
+        <div class="sub">${label}</div>
+      </div>`;
+    const block = iconBtn("Block", async () => {
+      try {
+        await api("/api/admin/blacklist", {
+          method: "POST",
+          body: JSON.stringify({ kind, spotify_id: r.id, name: r.name }),
+        });
+        toast(`Blocked "${r.name}"`);
+        loadBlacklist();
+      } catch (err) { toast(err.message); }
+    });
+    const wrap = document.createElement("div");
+    wrap.className = "actions";
+    wrap.appendChild(block);
+    li.appendChild(wrap);
+    ul.appendChild(li);
+  });
+}
 
 async function loadBlacklist() {
   const { items } = await api("/api/admin/blacklist");
   const ul = $("#blacklist");
   ul.innerHTML = "";
+  $("#blacklist-empty").classList.toggle("hidden", items.length > 0);
   items.forEach((it) => {
     const li = document.createElement("li");
     li.innerHTML = `<div class="info"><div class="title">${escapeHtml(it.name)}</div>
-      <div class="sub">${it.kind} · ${escapeHtml(it.spotify_id)}</div></div>`;
+      <div class="sub">${it.kind}</div></div>`;
     const del = iconBtn("✕", async () => { await api(`/api/admin/blacklist/${it.id}`, { method: "DELETE" }); loadBlacklist(); });
     del.classList.add("ghost");
     const wrap = document.createElement("div");

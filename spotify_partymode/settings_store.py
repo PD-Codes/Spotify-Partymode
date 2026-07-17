@@ -19,6 +19,11 @@ POLL_INTERVAL = "poll_interval_seconds"
 SECRET_KEY = "secret_key"
 REGISTRATION_OPEN = "registration_open"
 INSERT_LEAD = "insert_lead_seconds"
+# Number of skip tokens each guest gets per hour (reset every full hour).
+SKIP_TOKENS_PER_HOUR = "skip_tokens_per_hour"
+# How many artists / individual tracks a single guest may block per party.
+GUEST_BLOCK_ARTISTS_MAX = "guest_block_artists_max"
+GUEST_BLOCK_TRACKS_MAX = "guest_block_tracks_max"
 
 _DEFAULTS = {
     SPOTIFY_CLIENT_ID: "",
@@ -30,6 +35,9 @@ _DEFAULTS = {
     # so the admin must explicitly opt in to open registration.
     REGISTRATION_OPEN: False,
     INSERT_LEAD: 20,
+    SKIP_TOKENS_PER_HOUR: 3,
+    GUEST_BLOCK_ARTISTS_MAX: 3,
+    GUEST_BLOCK_TRACKS_MAX: 5,
 }
 
 
@@ -85,3 +93,25 @@ def get_insert_lead() -> int:
 
 def is_registration_open() -> bool:
     return bool(get(REGISTRATION_OPEN))
+
+
+def get_skip_tokens_per_hour() -> int:
+    """Skip tokens granted to each guest, refilled every full hour."""
+    try:
+        return max(0, int(get(SKIP_TOKENS_PER_HOUR)))
+    except (TypeError, ValueError):
+        return 3
+
+
+def get_guest_block_artists_max() -> int:
+    try:
+        return max(0, int(get(GUEST_BLOCK_ARTISTS_MAX)))
+    except (TypeError, ValueError):
+        return 3
+
+
+def get_guest_block_tracks_max() -> int:
+    try:
+        return max(0, int(get(GUEST_BLOCK_TRACKS_MAX)))
+    except (TypeError, ValueError):
+        return 5

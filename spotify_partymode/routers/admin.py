@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel
 
-from .. import db, queue_manager, security, settings_store, spotify_client
+from .. import db, guide, queue_manager, security, settings_store, spotify_client
 from . import deps
 from .deps import AdminGuard
 
@@ -26,6 +26,9 @@ def get_settings() -> dict:
         "poll_interval_seconds": settings_store.get_poll_interval(),
         "insert_lead_seconds": settings_store.get_insert_lead(),
         "registration_open": settings_store.is_registration_open(),
+        "skip_tokens_per_hour": settings_store.get_skip_tokens_per_hour(),
+        "guest_block_artists_max": settings_store.get_guest_block_artists_max(),
+        "guest_block_tracks_max": settings_store.get_guest_block_tracks_max(),
         "spotify_connected": spotify_client.is_admin_authenticated(),
     }
 
@@ -38,6 +41,9 @@ class SettingsBody(BaseModel):
     poll_interval_seconds: int | None = None
     insert_lead_seconds: int | None = None
     registration_open: bool | None = None
+    skip_tokens_per_hour: int | None = None
+    guest_block_artists_max: int | None = None
+    guest_block_tracks_max: int | None = None
 
 
 @router.post("/settings")
@@ -57,7 +63,47 @@ def update_settings(body: SettingsBody) -> dict:
         settings_store.set(settings_store.INSERT_LEAD, int(body.insert_lead_seconds))
     if body.registration_open is not None:
         settings_store.set(settings_store.REGISTRATION_OPEN, bool(body.registration_open))
+    if body.skip_tokens_per_hour is not None:
+        settings_store.set(settings_store.SKIP_TOKENS_PER_HOUR, max(0, int(body.skip_tokens_per_hour)))
+    if body.guest_block_artists_max is not None:
+        settings_store.set(
+            settings_store.GUEST_BLOCK_ARTISTS_MAX, max(0, int(body.guest_block_artists_max))
+        )
+    if body.guest_block_tracks_max is not None:
+        settings_store.set(
+            settings_store.GUEST_BLOCK_TRACKS_MAX, max(0, int(body.guest_block_tracks_max))
+        )
     return {"ok": True}
+
+
+# --- Spotify search (for the blacklist picker) -------------------------------
+
+@router.get("/search")
+async def admin_search(q: str, type_: str = Query("track", alias="type")) -> dict:
+    """Search Spotify for tracks (default) or artists, to fill the blacklist."""
+    if not spotify_client.is_admin_authenticated():
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "Connect Spotify first to search."
+        )
+    if type_ == "artist":
+        return {"results": await spotify_client.search_artists(q), "type": "artist"}
+    return {"results": await spotify_client.search_tracks(q), "type": "track"}
+
+
+# --- printable guest guide (PDF) ---------------------------------------------
+
+@router.get("/guide.pdf")
+def guest_guide_pdf() -> Response:
+    """Render a printable one-page guest guide (join URL + QR code) as a PDF."""
+    try:
+        pdf_bytes = guide.build_guide_pdf()
+    except guide.GuideError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "inline; filename=partymode-anleitung.pdf"},
+    )
 
 
 # --- user / account management -----------------------------------------------

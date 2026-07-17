@@ -99,11 +99,41 @@ async function refresh() {
   }
 
   renderNowPlaying(state.current);
+  renderTokens(state);
   renderWishes(state.wishes);
   renderUpcoming(state.upcoming);
   loadHistory();
   loadPlayHistory();
+  loadBlocks();
 }
+
+// --- skip tokens ---
+function renderTokens(state) {
+  const info = $("#token-info");
+  const btn = $("#skip-btn");
+  const t = state.tokens || { max: 0, remaining: 0 };
+  if (!t.max) {
+    // Feature disabled by the admin (0 tokens) -> hide the whole control.
+    info.textContent = "";
+    btn.classList.add("hidden");
+    return;
+  }
+  btn.classList.remove("hidden");
+  info.textContent = `Skip tokens: ${t.remaining}/${t.max} left this hour`;
+  btn.disabled = !(state.party_on && state.current && t.remaining > 0);
+}
+
+$("#skip-btn").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/skip", { method: "POST" });
+    toast("Skipped");
+    if (r.tokens) {
+      $("#token-info").textContent = `Skip tokens: ${r.tokens.remaining}/${r.tokens.max} left this hour`;
+      $("#skip-btn").disabled = r.tokens.remaining <= 0;
+    }
+    refresh();
+  } catch (err) { toast(err.message); }
+});
 
 async function loadPlayHistory() {
   let data;
@@ -231,6 +261,72 @@ async function addWish(t) {
   } catch (err) {
     toast(err.message);
   }
+}
+
+// --- personal blocks ---
+$("#block-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const kind = $("#block-kind").value;
+  const q = $("#block-search").value.trim();
+  if (!q) return;
+  try {
+    const { results } = await api(`/api/search?type=${kind}&q=${encodeURIComponent(q)}`);
+    renderBlockResults(kind, results);
+  } catch (err) { toast(err.message); }
+});
+
+function renderBlockResults(kind, results) {
+  const ul = $("#block-results");
+  ul.innerHTML = "";
+  for (const r of results) {
+    const li = document.createElement("li");
+    const sub = kind === "artist" ? "Artist" : escapeHtml(r.artist || "");
+    li.innerHTML = `
+      ${cover(r.image_url)}
+      <div class="info">
+        <div class="title">${escapeHtml(r.name)}</div>
+        <div class="sub">${sub}</div>
+      </div>
+      <div class="actions"><button class="btn ghost small">Block</button></div>`;
+    li.querySelector("button").addEventListener("click", () => blockItem(kind, r));
+    ul.appendChild(li);
+  }
+}
+
+async function blockItem(kind, r) {
+  try {
+    await api("/api/block", { method: "POST", body: JSON.stringify({ kind, spotify_id: r.id, name: r.name }) });
+    toast(`Blocked "${r.name}"`);
+    $("#block-search").value = "";
+    $("#block-results").innerHTML = "";
+    loadBlocks();
+    refresh();
+  } catch (err) { toast(err.message); }
+}
+
+async function loadBlocks() {
+  let data;
+  try { data = await api("/api/blocks"); } catch { return; }
+  const ul = $("#block-list");
+  ul.innerHTML = "";
+  $("#block-empty").classList.toggle("hidden", data.blocks.length > 0);
+  for (const b of data.blocks) {
+    const li = document.createElement("li");
+    li.innerHTML = `
+      <div class="info">
+        <div class="title">${escapeHtml(b.name)}</div>
+        <div class="sub">${escapeHtml(b.kind)}</div>
+      </div>
+      <div class="actions"><button class="btn icon small ghost">✕</button></div>`;
+    li.querySelector("button").addEventListener("click", async () => {
+      try { await api(`/api/block/${b.id}`, { method: "DELETE" }); loadBlocks(); refresh(); }
+      catch (err) { toast(err.message); }
+    });
+    ul.appendChild(li);
+  }
+  const lim = data.limits || {};
+  $("#block-limits").textContent =
+    `Artists: ${lim.artists_used || 0}/${lim.artists_max || 0}  ·  Tracks: ${lim.tracks_used || 0}/${lim.tracks_max || 0}`;
 }
 
 function escapeHtml(s) {

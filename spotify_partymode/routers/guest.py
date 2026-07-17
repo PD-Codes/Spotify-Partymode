@@ -2,17 +2,37 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import time
+
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel
 
-from .. import db, queue_manager, spotify_client
+from .. import db, queue_manager, settings_store, spotify_client
 from .deps import GuestName
 
 router = APIRouter(prefix="/api", tags=["guest"])
 
 
+def _hour_bucket() -> int:
+    """Current whole-hour bucket used to refill skip tokens."""
+    return int(time.time() // 3600)
+
+
+def _token_status(guest_name: str) -> dict:
+    """Skip-token budget for a guest in the current hour."""
+    maximum = settings_store.get_skip_tokens_per_hour()
+    bucket = _hour_bucket()
+    used = db.get_guest_skips_used(guest_name, bucket)
+    return {
+        "max": maximum,
+        "used": used,
+        "remaining": max(0, maximum - used),
+        "resets_at": (bucket + 1) * 3600,
+    }
+
+
 @router.get("/state")
-async def get_state(_: str = GuestName) -> dict:
+async def get_state(guest_name: str = GuestName) -> dict:
     """Return current track, the wish queue (with who added) and playlist upcoming."""
     party_on = queue_manager.is_party_on()
     current = None
@@ -52,6 +72,7 @@ async def get_state(_: str = GuestName) -> dict:
         "wishes": wishes,
         "upcoming": upcoming,
         "session": {"id": session["id"], "name": session["name"]} if session else None,
+        "tokens": _token_status(guest_name),
     }
 
 
@@ -100,12 +121,110 @@ def _play_row(p: dict) -> dict:
 
 
 @router.get("/search")
-async def search(q: str, _: str = GuestName) -> dict:
-    """Search Spotify tracks. Requires a guest session."""
+async def search(
+    q: str,
+    type_: str = Query("track", alias="type"),
+    _: str = GuestName,
+) -> dict:
+    """Search Spotify for tracks (default) or artists. Requires a guest session."""
     if not spotify_client.is_admin_authenticated():
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Admin is not connected to Spotify.")
+    if type_ == "artist":
+        results = await spotify_client.search_artists(q)
+        return {"results": results, "type": "artist"}
     results = await spotify_client.search_tracks(q)
-    return {"results": results}
+    return {"results": results, "type": "track"}
+
+
+# --- skip tokens -------------------------------------------------------------
+
+@router.get("/tokens")
+def get_tokens(guest_name: str = GuestName) -> dict:
+    """Return the guest's current skip-token budget."""
+    return {"tokens": _token_status(guest_name)}
+
+
+@router.post("/skip")
+async def guest_skip(guest_name: str = GuestName) -> dict:
+    """Spend one skip token to skip the currently playing track."""
+    if not queue_manager.is_party_on():
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "The party is not running.")
+    if not spotify_client.is_admin_authenticated():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Admin is not connected to Spotify.")
+    maximum = settings_store.get_skip_tokens_per_hour()
+    bucket = _hour_bucket()
+    if db.get_guest_skips_used(guest_name, bucket) >= maximum:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "No skip tokens left — they refill at the next full hour.",
+        )
+    try:
+        await spotify_client.skip_next()
+    except Exception as exc:  # noqa: BLE001 - only charge a token on a real skip
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, "Could not skip right now. Please try again."
+        ) from exc
+    # Charge the token only after the skip actually succeeded.
+    db.incr_guest_skip(guest_name, bucket)
+    return {"ok": True, "tokens": _token_status(guest_name)}
+
+
+# --- personal blocks ---------------------------------------------------------
+
+class BlockBody(BaseModel):
+    kind: str  # 'artist' or 'track'
+    spotify_id: str
+    name: str
+
+
+def _block_limits(session_id, guest_name: str) -> dict:
+    return {
+        "artists_max": settings_store.get_guest_block_artists_max(),
+        "tracks_max": settings_store.get_guest_block_tracks_max(),
+        "artists_used": db.count_guest_blocks(session_id, guest_name, "artist"),
+        "tracks_used": db.count_guest_blocks(session_id, guest_name, "track"),
+    }
+
+
+@router.get("/blocks")
+def get_blocks(guest_name: str = GuestName) -> dict:
+    """List the guest's own blocks for the current party and their limits."""
+    sid = db.current_session_id()
+    return {"blocks": db.list_guest_blocks(sid, guest_name), "limits": _block_limits(sid, guest_name)}
+
+
+@router.post("/block")
+def add_block(body: BlockBody, guest_name: str = GuestName) -> dict:
+    """Block an artist or track for the party (skipped for everyone)."""
+    if body.kind not in ("artist", "track"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "kind must be 'artist' or 'track'.")
+    spotify_id = body.spotify_id.strip()
+    name = body.name.strip()
+    if not spotify_id or not name:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A valid selection is required.")
+    sid = db.current_session_id()
+    if db.guest_block_exists(sid, guest_name, body.kind, spotify_id):
+        raise HTTPException(status.HTTP_409_CONFLICT, "You already blocked that.")
+    maximum = (
+        settings_store.get_guest_block_artists_max()
+        if body.kind == "artist"
+        else settings_store.get_guest_block_tracks_max()
+    )
+    if db.count_guest_blocks(sid, guest_name, body.kind) >= maximum:
+        label = "artists" if body.kind == "artist" else "tracks"
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, f"You reached your limit of {maximum} blocked {label}."
+        )
+    db.add_guest_block(sid, guest_name, body.kind, spotify_id, name)
+    return {"ok": True, "limits": _block_limits(sid, guest_name)}
+
+
+@router.delete("/block/{block_id}")
+def delete_block(block_id: int, guest_name: str = GuestName) -> dict:
+    """Remove one of the guest's own blocks."""
+    db.remove_guest_block(block_id, guest_name)
+    sid = db.current_session_id()
+    return {"ok": True, "limits": _block_limits(sid, guest_name)}
 
 
 class WishBody(BaseModel):
@@ -129,11 +248,12 @@ async def add_wish(body: WishBody, guest_name: str = GuestName) -> dict:
 
 
 def _blacklist_sets() -> tuple[set[str], set[str]]:
-    """Return (blocked track ids, blocked artist ids) loaded in one query."""
+    """Return (blocked track ids, blocked artist ids): admin blacklist + guest blocks."""
     items = db.list_blacklist()
     tracks = {i["spotify_id"] for i in items if i["kind"] == "track"}
     artists = {i["spotify_id"] for i in items if i["kind"] == "artist"}
-    return tracks, artists
+    guest_tracks, guest_artists = db.active_guest_block_sets(db.current_session_id())
+    return tracks | guest_tracks, artists | guest_artists
 
 
 def _simplify(item: dict, blacklist: tuple[set[str], set[str]] | None = None) -> dict:
