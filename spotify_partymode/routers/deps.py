@@ -17,6 +17,19 @@ def get_guest_name(request: Request) -> str:
     return name
 
 
+def get_device_id(request: Request) -> str:
+    """Return the persistent per-browser device id (set by middleware).
+
+    This id lives in a long-lived cookie that survives logout, so it anchors
+    per-guest limits (skip tokens, blocks) to the browser rather than the
+    freely chosen display name.
+    """
+    device_id = getattr(request.state, "device_id", None)
+    if not device_id:
+        device_id = request.cookies.get("device_id") or "anon"
+    return device_id
+
+
 # --- session generation (global logout on credential changes) -----------------
 
 _SESSION_GEN_KEY = "session_generation"
@@ -54,6 +67,7 @@ def require_admin(request: Request) -> None:
 
 AdminGuard = Depends(require_admin)
 GuestName = Depends(get_guest_name)
+DeviceId = Depends(get_device_id)
 
 
 # --- simple in-memory per-IP rate limiting for auth endpoints ------------------

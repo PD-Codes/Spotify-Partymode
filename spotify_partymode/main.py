@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
@@ -58,6 +59,28 @@ def create_app() -> FastAPI:
         max_age=60 * 60 * 24 * 30,
         same_site="lax",
     )
+
+    # Persistent per-browser device id. Unlike the session cookie it is NOT
+    # cleared on logout, so skip-token and block budgets (keyed by device id)
+    # cannot be reset by logging out and re-joining under a new name.
+    _DEVICE_COOKIE = "device_id"
+    _DEVICE_MAX_AGE = 60 * 60 * 24 * 365  # 1 year
+
+    @app.middleware("http")
+    async def ensure_device_id(request: Request, call_next):
+        device_id = request.cookies.get(_DEVICE_COOKIE)
+        issue = device_id if device_id else secrets.token_urlsafe(16)
+        request.state.device_id = issue
+        response = await call_next(request)
+        if not device_id:
+            response.set_cookie(
+                _DEVICE_COOKIE,
+                issue,
+                max_age=_DEVICE_MAX_AGE,
+                httponly=True,
+                samesite="lax",
+            )
+        return response
 
     app.include_router(auth.router)
     app.include_router(guest.router)

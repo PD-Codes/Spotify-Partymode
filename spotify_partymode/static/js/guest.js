@@ -5,6 +5,65 @@ const $ = (sel) => document.querySelector(sel);
 const POLL_MS = 4000;
 let pollTimer = null;
 
+// --- pagination (max 5 per page, state preserved across polling refreshes) ---
+const PAGE_SIZE = 5;
+const pageState = { wishes: 0, upcoming: 0, play: 0 };
+// Cache the latest data so pager buttons can re-render without a network call.
+const pageData = { wishes: [], upcoming: [], play: [] };
+
+function pageSlice(key, items) {
+  const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+  if (pageState[key] > totalPages - 1) pageState[key] = totalPages - 1;
+  if (pageState[key] < 0) pageState[key] = 0;
+  const start = pageState[key] * PAGE_SIZE;
+  return items.slice(start, start + PAGE_SIZE);
+}
+
+function renderPager(sel, key, total, rerender) {
+  const el = $(sel);
+  if (!el) return;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  if (total <= PAGE_SIZE) { el.innerHTML = ""; el.classList.add("hidden"); return; }
+  el.classList.remove("hidden");
+  el.innerHTML = "";
+  const mk = (label, disabled, fn) => {
+    const b = document.createElement("button");
+    b.className = "btn ghost small";
+    b.textContent = label;
+    b.disabled = disabled;
+    if (!disabled) b.addEventListener("click", fn);
+    return b;
+  };
+  el.appendChild(mk("‹", pageState[key] <= 0, () => { pageState[key]--; rerender(); }));
+  const info = document.createElement("span");
+  info.className = "muted small";
+  info.textContent = `${pageState[key] + 1} / ${totalPages}`;
+  el.appendChild(info);
+  el.appendChild(mk("›", pageState[key] >= totalPages - 1, () => { pageState[key]++; rerender(); }));
+}
+
+// --- "save to my own account" deep links -------------------------------------
+function spotifyOpenUrl(uri) {
+  if (!uri) return null;
+  const m = String(uri).match(/spotify:track:([A-Za-z0-9]+)/);
+  return m ? `https://open.spotify.com/track/${m[1]}` : null;
+}
+function ytMusicUrl(name, artist) {
+  const q = `${artist ? artist + " " : ""}${name || ""}`.trim();
+  return `https://music.youtube.com/search?q=${encodeURIComponent(q)}`;
+}
+// Anchor buttons that open the track in the guest's own Spotify / YT Music app.
+function saveLinksHtml(track) {
+  const sp = spotifyOpenUrl(track.uri);
+  const yt = ytMusicUrl(track.name, track.artist);
+  let html = "";
+  if (sp) {
+    html += `<a class="btn icon small ghost save-link" href="${sp}" target="_blank" rel="noopener" title="Open in Spotify">+ Spotify</a>`;
+  }
+  html += `<a class="btn icon small ghost save-link" href="${yt}" target="_blank" rel="noopener" title="Search on YouTube Music">+ YT Music</a>`;
+  return html;
+}
+
 // Default cover shown when a track has no artwork (or it fails to load).
 const DEFAULT_COVER = "data:image/svg+xml," + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80">' +
@@ -138,15 +197,22 @@ $("#skip-btn").addEventListener("click", async () => {
 async function loadPlayHistory() {
   let data;
   try { data = await api("/api/play-history"); } catch { return; }
+  pageData.play = data.history;
+  renderPlayHistory();
+}
+
+function renderPlayHistory() {
   const ul = $("#play-history");
   if (!ul) return;
+  const items = pageData.play;
   ul.innerHTML = "";
-  $("#play-empty").classList.toggle("hidden", data.history.length > 0);
-  for (const h of data.history) {
+  $("#play-empty").classList.toggle("hidden", items.length > 0);
+  for (const h of pageSlice("play", items)) {
     const tag = h.source === "wish" ? '<span class="badge queued">party added</span>' : "";
-    const li = trackRow(h, `<div class="actions"><span class="hist-time">${fmtTime(h.played_at)}</span>${tag}</div>`);
+    const li = trackRow(h, `<div class="actions save-row">${saveLinksHtml(h)}<span class="hist-time">${fmtTime(h.played_at)}</span>${tag}</div>`);
     ul.appendChild(li);
   }
+  renderPager("#play-pager", "play", items.length, renderPlayHistory);
 }
 
 function fmtTime(ts) {
@@ -178,17 +244,23 @@ async function loadHistory() {
 function renderNowPlaying(track) {
   const el = $("#now-playing");
   const img = el.querySelector(".cover");
+  const save = $("#np-save");
   img.onerror = () => { img.src = DEFAULT_COVER; };
   if (!track) {
     img.src = DEFAULT_COVER;
     el.querySelector(".title").textContent = "Nothing playing";
     el.querySelector(".sub").textContent = "";
+    if (save) { save.innerHTML = ""; save.classList.add("hidden"); }
     return;
   }
   img.src = track.image_url || DEFAULT_COVER;
   el.querySelector(".title").textContent = track.name;
   el.querySelector(".sub").textContent =
     (track.blacklisted ? "Blacklisted, will be skipped — " : "") + `${track.artist} · ${track.album}`;
+  if (save) {
+    save.innerHTML = `<span class="muted small">Save to:</span> ${saveLinksHtml(track)}`;
+    save.classList.remove("hidden");
+  }
 }
 
 function trackRow(t, extraHtml = "") {
@@ -208,14 +280,17 @@ function trackRow(t, extraHtml = "") {
 }
 
 function renderWishes(wishes) {
+  if (wishes) pageData.wishes = wishes;
+  const items = pageData.wishes;
   const ul = $("#wish-queue");
   ul.innerHTML = "";
-  $("#wish-empty").classList.toggle("hidden", wishes.length > 0);
-  for (const w of wishes) {
+  $("#wish-empty").classList.toggle("hidden", items.length > 0);
+  for (const w of pageSlice("wishes", items)) {
     const badge = badgeFor(w);
     const li = trackRow(w, `<div class="actions"><span class="added-by">${escapeHtml(w.added_by)}</span>${badge}</div>`);
     ul.appendChild(li);
   }
+  renderPager("#wish-pager", "wishes", items.length, () => renderWishes());
 }
 
 function badgeFor(w) {
@@ -225,9 +300,14 @@ function badgeFor(w) {
 }
 
 function renderUpcoming(list) {
+  if (list) pageData.upcoming = list;
+  const items = pageData.upcoming;
   const ul = $("#upcoming");
   ul.innerHTML = "";
-  for (const t of list) ul.appendChild(trackRow(t));
+  const emptyEl = $("#upcoming-empty");
+  if (emptyEl) emptyEl.classList.toggle("hidden", items.length > 0);
+  for (const t of pageSlice("upcoming", items)) ul.appendChild(trackRow(t));
+  renderPager("#upcoming-pager", "upcoming", items.length, () => renderUpcoming());
 }
 
 // --- search & add ---

@@ -76,21 +76,22 @@ CREATE TABLE IF NOT EXISTS play_history (
 );
 
 CREATE TABLE IF NOT EXISTS guest_token_usage (
-    guest_name  TEXT NOT NULL,
+    device_id   TEXT NOT NULL,          -- persistent per-browser id (survives logout)
     hour_bucket INTEGER NOT NULL,       -- floor(unix_time / 3600)
     skips_used  INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (guest_name, hour_bucket)
+    PRIMARY KEY (device_id, hour_bucket)
 );
 
 CREATE TABLE IF NOT EXISTS guest_block (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER,                 -- party scope; NULL = no active session
-    guest_name TEXT NOT NULL,
+    device_id  TEXT NOT NULL,           -- owner (persistent per-browser id)
+    guest_name TEXT NOT NULL,           -- display label at time of blocking
     kind       TEXT NOT NULL,           -- 'artist' or 'track'
     spotify_id TEXT NOT NULL,
     name       TEXT NOT NULL,
     created_at REAL NOT NULL,
-    UNIQUE (session_id, guest_name, kind, spotify_id)
+    UNIQUE (session_id, device_id, kind, spotify_id)
 );
 """
 
@@ -110,6 +111,14 @@ def get_conn() -> Iterator[sqlite3.Connection]:
 def init_db() -> None:
     """Create tables if they do not exist yet (and migrate older databases)."""
     with get_conn() as conn:
+        # Migration: earlier previews keyed guest tokens/blocks by name. Recreate
+        # those tables on the device_id-based schema (counters carry no history
+        # worth preserving). Must run BEFORE executescript, which is a no-op for
+        # already-existing tables.
+        for table in ("guest_token_usage", "guest_block"):
+            existing = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            if existing and "device_id" not in existing:
+                conn.execute(f"DROP TABLE {table}")
         conn.executescript(_SCHEMA)
         # Migration: add wish.session_id to databases created before sessions.
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(wish)").fetchall()]
@@ -464,19 +473,23 @@ def is_blacklisted(track_id: str, artist_ids: list[str]) -> bool:
 
 
 # --- guest skip tokens -------------------------------------------------------
+#
+# Keyed by a persistent per-browser device_id (a long-lived cookie that
+# survives logout), so a guest cannot refill their budget by simply logging
+# out and re-joining under a new name.
 
-def get_guest_skips_used(guest_name: str, hour_bucket: int) -> int:
-    """Return how many skip tokens the guest already spent in this hour bucket."""
+def get_guest_skips_used(device_id: str, hour_bucket: int) -> int:
+    """Return how many skip tokens this device already spent in the hour bucket."""
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT skips_used FROM guest_token_usage WHERE guest_name = ? AND hour_bucket = ?",
-            (guest_name, hour_bucket),
+            "SELECT skips_used FROM guest_token_usage WHERE device_id = ? AND hour_bucket = ?",
+            (device_id, hour_bucket),
         ).fetchone()
     return int(row["skips_used"]) if row else 0
 
 
-def incr_guest_skip(guest_name: str, hour_bucket: int) -> int:
-    """Record one spent skip token for the guest in this hour; return new total.
+def incr_guest_skip(device_id: str, hour_bucket: int) -> int:
+    """Record one spent skip token for this device in this hour; return new total.
 
     Old buckets are pruned opportunistically so the table stays small.
     """
@@ -485,63 +498,63 @@ def incr_guest_skip(guest_name: str, hour_bucket: int) -> int:
             "DELETE FROM guest_token_usage WHERE hour_bucket < ?", (hour_bucket,)
         )
         conn.execute(
-            "INSERT INTO guest_token_usage (guest_name, hour_bucket, skips_used) VALUES (?, ?, 1) "
-            "ON CONFLICT(guest_name, hour_bucket) DO UPDATE SET skips_used = skips_used + 1",
-            (guest_name, hour_bucket),
+            "INSERT INTO guest_token_usage (device_id, hour_bucket, skips_used) VALUES (?, ?, 1) "
+            "ON CONFLICT(device_id, hour_bucket) DO UPDATE SET skips_used = skips_used + 1",
+            (device_id, hour_bucket),
         )
         row = conn.execute(
-            "SELECT skips_used FROM guest_token_usage WHERE guest_name = ? AND hour_bucket = ?",
-            (guest_name, hour_bucket),
+            "SELECT skips_used FROM guest_token_usage WHERE device_id = ? AND hour_bucket = ?",
+            (device_id, hour_bucket),
         ).fetchone()
     return int(row["skips_used"]) if row else 1
 
 
 # --- guest blocks ------------------------------------------------------------
 
-def count_guest_blocks(session_id: Optional[int], guest_name: str, kind: str) -> int:
+def count_guest_blocks(session_id: Optional[int], device_id: str, kind: str) -> int:
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT COUNT(*) AS c FROM guest_block WHERE guest_name = ? AND kind = ? "
+            "SELECT COUNT(*) AS c FROM guest_block WHERE device_id = ? AND kind = ? "
             "AND (session_id = ? OR (session_id IS NULL AND ? IS NULL))",
-            (guest_name, kind, session_id, session_id),
+            (device_id, kind, session_id, session_id),
         ).fetchone()
     return int(row["c"])
 
 
-def guest_block_exists(session_id: Optional[int], guest_name: str, kind: str, spotify_id: str) -> bool:
+def guest_block_exists(session_id: Optional[int], device_id: str, kind: str, spotify_id: str) -> bool:
     with get_conn() as conn:
         return conn.execute(
-            "SELECT 1 FROM guest_block WHERE guest_name = ? AND kind = ? AND spotify_id = ? "
+            "SELECT 1 FROM guest_block WHERE device_id = ? AND kind = ? AND spotify_id = ? "
             "AND (session_id = ? OR (session_id IS NULL AND ? IS NULL))",
-            (guest_name, kind, spotify_id, session_id, session_id),
+            (device_id, kind, spotify_id, session_id, session_id),
         ).fetchone() is not None
 
 
 def add_guest_block(
-    session_id: Optional[int], guest_name: str, kind: str, spotify_id: str, name: str
+    session_id: Optional[int], device_id: str, guest_name: str, kind: str, spotify_id: str, name: str
 ) -> None:
     with get_conn() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO guest_block (session_id, guest_name, kind, spotify_id, name, "
-            "created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, guest_name, kind, spotify_id, name, time.time()),
+            "INSERT OR IGNORE INTO guest_block (session_id, device_id, guest_name, kind, "
+            "spotify_id, name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, device_id, guest_name, kind, spotify_id, name, time.time()),
         )
 
 
-def remove_guest_block(block_id: int, guest_name: str) -> None:
-    """Delete a block only if it belongs to the requesting guest."""
+def remove_guest_block(block_id: int, device_id: str) -> None:
+    """Delete a block only if it belongs to the requesting device."""
     with get_conn() as conn:
         conn.execute(
-            "DELETE FROM guest_block WHERE id = ? AND guest_name = ?", (block_id, guest_name)
+            "DELETE FROM guest_block WHERE id = ? AND device_id = ?", (block_id, device_id)
         )
 
 
-def list_guest_blocks(session_id: Optional[int], guest_name: str) -> list[dict]:
+def list_guest_blocks(session_id: Optional[int], device_id: str) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM guest_block WHERE guest_name = ? "
+            "SELECT * FROM guest_block WHERE device_id = ? "
             "AND (session_id = ? OR (session_id IS NULL AND ? IS NULL)) ORDER BY created_at DESC",
-            (guest_name, session_id, session_id),
+            (device_id, session_id, session_id),
         ).fetchall()
     return [dict(r) for r in rows]
 
