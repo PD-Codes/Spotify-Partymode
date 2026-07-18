@@ -52,8 +52,17 @@ function ytMusicUrl(name, artist) {
   const q = `${artist ? artist + " " : ""}${name || ""}`.trim();
   return `https://music.youtube.com/search?q=${encodeURIComponent(q)}`;
 }
+// Local files (uri like "spotify:local:...") don't exist on Spotify or YT Music.
+function isLocalTrack(track) {
+  return String(track && track.uri || "").startsWith("spotify:local:");
+}
+
 // Anchor buttons that open the track in the guest's own Spotify / YT Music app.
+// For local files we show an info label instead of (useless) links.
 function saveLinksHtml(track) {
+  if (isLocalTrack(track)) {
+    return '<span class="muted small local-tag">Local file — not on Spotify/YT Music</span>';
+  }
   const sp = spotifyOpenUrl(track.uri);
   const yt = ytMusicUrl(track.name, track.artist);
   let html = "";
@@ -258,7 +267,10 @@ function renderNowPlaying(track) {
   el.querySelector(".sub").textContent =
     (track.blacklisted ? "Blacklisted, will be skipped — " : "") + `${track.artist} · ${track.album}`;
   if (save) {
-    save.innerHTML = `<span class="muted small">Save to:</span> ${saveLinksHtml(track)}`;
+    // For local files, just show the info label (no "Save to:" prefix / buttons).
+    save.innerHTML = isLocalTrack(track)
+      ? saveLinksHtml(track)
+      : `<span class="muted small">Save to:</span> ${saveLinksHtml(track)}`;
     save.classList.remove("hidden");
   }
 }

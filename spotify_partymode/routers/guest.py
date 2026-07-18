@@ -31,33 +31,68 @@ def _token_status(device_id: str) -> dict:
     }
 
 
-def _current_from_cache(blacklist) -> dict | None:
-    """Return the poller's cached 'now playing' if it is fresh, else None.
+# Short shared throttle so many guests polling at once don't multiply Spotify
+# calls: one live fetch every _SPOTIFY_THROTTLE seconds, reused by all requests.
+_SPOTIFY_THROTTLE = 2.0
+_pb_cache: dict = {"ts": 0.0, "data": None}
+_q_cache: dict = {"ts": 0.0, "data": None}
 
-    Correct for local media (the poller reads /me/player which reports local
-    files), and re-evaluates the blacklist flag against the current sets.
+
+async def _throttled(cache: dict, fetch) -> object:
+    now = time.time()
+    if cache["ts"] and now - cache["ts"] < _SPOTIFY_THROTTLE:
+        return cache["data"]
+    try:
+        data = await fetch()
+    except Exception:  # noqa: BLE001 - playback may be inactive / transient errors
+        data = None
+    cache["ts"] = now
+    cache["data"] = data
+    return data
+
+
+def _current_from_playback(pb, blacklist) -> dict | None:
+    """Build the "now playing" record from /me/player (the authoritative source).
+
+    Unlike the queue endpoint's `currently_playing` (which returns the NEXT real
+    track while a local file plays), /me/player carries the real current track in
+    `item` — including local files (is_local=True, id=null, name/artist from the
+    file metadata). We use `item` whenever it is present, REGARDLESS of the
+    is_playing flag: Spotify reports is_playing=false for local files even while
+    they play, so gating on it is exactly what made the app show the next song.
+
+    Returns None only when there is no track object at all, so the caller may
+    fall back to the queue snapshot.
     """
-    cached = db.kv_get(queue_manager.KEY_NOW_PLAYING)
-    if not cached:
+    if not pb:
         return None
-    fresh_for = max(15, settings_store.get_poll_interval() * 3)
-    if time.time() - cached.get("ts", 0) > fresh_for:
-        return None  # poller idle (party off / playback stopped) -> let caller fall back
-    track = cached.get("track") or {}
+    item = pb.get("item")
+    if not item:
+        # Playing but no track object at all -> unrepresentable content (ad).
+        if pb.get("is_playing"):
+            cpt = (pb.get("currently_playing_type") or "").lower()
+            label = "Advertisement" if cpt == "ad" else "Local playback"
+            return {"uri": None, "name": label, "artist": "", "album": "",
+                    "image_url": "", "blacklisted": False}
+        return None
+    is_local = bool(item.get("is_local"))
+    images = (item.get("album", {}) or {}).get("images", [])
+    track_id = item.get("id")
+    artist_ids = [a.get("id") for a in item.get("artists", []) if a.get("id")]
     blacklisted = False
     if blacklist is not None:
         blocked_tracks, blocked_artists = blacklist
-        tid = track.get("track_id")
-        aids = track.get("artist_ids", [])
         blacklisted = bool(
-            (tid and tid in blocked_tracks) or any(a in blocked_artists for a in aids)
+            (track_id and track_id in blocked_tracks)
+            or any(a in blocked_artists for a in artist_ids)
         )
     return {
-        "uri": track.get("uri"),
-        "name": track.get("name"),
-        "artist": track.get("artist"),
-        "album": track.get("album", ""),
-        "image_url": track.get("image_url", ""),
+        "uri": item.get("uri"),
+        "name": item.get("name") or ("Local playback" if is_local else ""),
+        "artist": ", ".join(a.get("name", "") for a in item.get("artists", []))
+        or ("Local file" if is_local else ""),
+        "album": (item.get("album", {}) or {}).get("name", ""),
+        "image_url": images[-1]["url"] if images else "",
         "blacklisted": blacklisted,
     }
 
@@ -69,20 +104,21 @@ async def get_state(_: str = GuestName, device_id: str = DeviceId) -> dict:
     current = None
     upcoming: list[dict] = []
     if spotify_client.is_admin_authenticated():
-        try:
-            queue = await spotify_client.get_queue()
-        except Exception:  # noqa: BLE001 - playback may be inactive
-            queue = {"currently_playing": None, "queue": []}
         # Load the blacklist once per request instead of one query per track.
         blacklist = _blacklist_sets() if party_on else None
-        # Prefer the poller's fresh snapshot (correct for local files); only fall
-        # back to the queue endpoint's currently_playing when it is stale/absent.
-        current = _current_from_cache(blacklist)
+        # Authoritative "now playing" comes from /me/player, NOT the queue's
+        # currently_playing (which shows the next song while a local file plays).
+        pb = await _throttled(_pb_cache, spotify_client.get_playback)
+        current = _current_from_playback(pb, blacklist)
+        queue = await _throttled(_q_cache, spotify_client.get_queue) or {
+            "currently_playing": None, "queue": []
+        }
+        # Only if nothing is actively playing, fall back to the queue snapshot.
         if current is None:
             cp = queue.get("currently_playing")
             if cp:
                 current = _simplify(cp, blacklist)
-        upcoming = [_simplify(t, blacklist) for t in queue.get("queue", [])[:12]]
+        upcoming = [_simplify(t, blacklist) for t in (queue.get("queue") or [])[:12]]
 
     current_uri = current["uri"] if current else None
     wishes = [
