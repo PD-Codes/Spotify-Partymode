@@ -4,6 +4,42 @@
 const $ = (sel) => document.querySelector(sel);
 const POLL_MS = 4000;
 
+// --- pagination for the History lists (max 10 per page) ---
+const HIST_PAGE_SIZE = 10;
+const histPage = { play: 0, wish: 0 };
+const histData = { play: [], wish: [] };
+
+function histSlice(key, items) {
+  const totalPages = Math.max(1, Math.ceil(items.length / HIST_PAGE_SIZE));
+  if (histPage[key] > totalPages - 1) histPage[key] = totalPages - 1;
+  if (histPage[key] < 0) histPage[key] = 0;
+  const start = histPage[key] * HIST_PAGE_SIZE;
+  return items.slice(start, start + HIST_PAGE_SIZE);
+}
+
+function renderHistPager(sel, key, total, rerender) {
+  const el = $(sel);
+  if (!el) return;
+  const totalPages = Math.max(1, Math.ceil(total / HIST_PAGE_SIZE));
+  if (total <= HIST_PAGE_SIZE) { el.innerHTML = ""; el.classList.add("hidden"); return; }
+  el.classList.remove("hidden");
+  el.innerHTML = "";
+  const mk = (label, disabled, fn) => {
+    const b = document.createElement("button");
+    b.className = "btn ghost small";
+    b.textContent = label;
+    b.disabled = disabled;
+    if (!disabled) b.addEventListener("click", fn);
+    return b;
+  };
+  el.appendChild(mk("‹", histPage[key] <= 0, () => { histPage[key]--; rerender(); }));
+  const info = document.createElement("span");
+  info.className = "muted small";
+  info.textContent = `${histPage[key] + 1} / ${totalPages}`;
+  el.appendChild(info);
+  el.appendChild(mk("›", histPage[key] >= totalPages - 1, () => { histPage[key]++; rerender(); }));
+}
+
 const DEFAULT_COVER = "data:image/svg+xml," + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80">' +
   '<rect width="80" height="80" rx="8" fill="#2a2a2a"/>' +
@@ -369,7 +405,12 @@ async function loadSessions() {
   const sel = $("#session-select");
   const cur = data.sessions.find((s) => s.is_current);
   currentSessionId = cur ? cur.id : null;
-  if (viewSessionId === null) viewSessionId = currentSessionId;
+  // Default the History view to the active session, or (when the party is over)
+  // to the most recent one — otherwise the history looks empty/"deleted" after
+  // a party even though the data is still there.
+  if (viewSessionId === null) {
+    viewSessionId = currentSessionId ?? (data.sessions[0] ? data.sessions[0].id : null);
+  }
   sel.innerHTML = "";
   data.sessions.forEach((s) => {
     const opt = document.createElement("option");
@@ -395,6 +436,8 @@ function updateClearButtons() {
 
 $("#session-select").addEventListener("change", (e) => {
   viewSessionId = parseInt(e.target.value, 10) || null;
+  histPage.play = 0;
+  histPage.wish = 0;
   updateClearButtons();
   loadHistory();
   loadPlayHistory();
@@ -419,13 +462,19 @@ $("#end-session").addEventListener("click", async () => {
 });
 
 async function loadHistory() {
-  if (!viewSessionId) { $("#history").innerHTML = ""; $("#history-empty").classList.remove("hidden"); return; }
+  if (!viewSessionId) { histData.wish = []; renderWishHistory(); return; }
   let data;
   try { data = await api(`/api/admin/sessions/${viewSessionId}/history`); } catch { return; }
+  histData.wish = data.history;
+  renderWishHistory();
+}
+
+function renderWishHistory() {
   const ul = $("#history");
+  const items = histData.wish;
   ul.innerHTML = "";
-  $("#history-empty").classList.toggle("hidden", data.history.length > 0);
-  data.history.forEach((h) => {
+  $("#history-empty").classList.toggle("hidden", items.length > 0);
+  histSlice("wish", items).forEach((h) => {
     const li = document.createElement("li");
     const tag = h.status === "rejected" ? '<span class="badge">rejected</span>' : "";
     li.innerHTML = `
@@ -445,16 +494,23 @@ async function loadHistory() {
     li.appendChild(wrap);
     ul.appendChild(li);
   });
+  renderHistPager("#history-pager", "wish", items.length, renderWishHistory);
 }
 
 async function loadPlayHistory() {
-  if (!viewSessionId) { $("#play-history").innerHTML = ""; $("#play-empty").classList.remove("hidden"); return; }
+  if (!viewSessionId) { histData.play = []; renderPlayHistoryAdmin(); return; }
   let data;
   try { data = await api(`/api/admin/sessions/${viewSessionId}/play-history`); } catch { return; }
+  histData.play = data.history;
+  renderPlayHistoryAdmin();
+}
+
+function renderPlayHistoryAdmin() {
   const ul = $("#play-history");
+  const items = histData.play;
   ul.innerHTML = "";
-  $("#play-empty").classList.toggle("hidden", data.history.length > 0);
-  data.history.forEach((h) => {
+  $("#play-empty").classList.toggle("hidden", items.length > 0);
+  histSlice("play", items).forEach((h) => {
     const li = document.createElement("li");
     const tag = h.source === "wish" ? '<span class="badge queued">party added</span>' : "";
     const by = h.added_by ? ` · <span class="added-by">${escapeHtml(h.added_by)}</span>` : "";
@@ -475,6 +531,7 @@ async function loadPlayHistory() {
     li.appendChild(wrap);
     ul.appendChild(li);
   });
+  renderHistPager("#play-pager", "play", items.length, renderPlayHistoryAdmin);
 }
 
 $("#clear-history").addEventListener("click", async () => {

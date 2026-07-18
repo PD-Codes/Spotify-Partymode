@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from . import db, settings_store, spotify_client
 
@@ -72,6 +73,11 @@ def add_guest_wish(track: dict, added_by: str) -> int:
 KEY_FEED_MARKER = "feed_marker"
 KEY_CURRENT_WISH = "current_wish"
 KEY_LAST_PLAYED = "last_played_uri"
+# Cached snapshot of what is REALLY playing right now, taken from /me/player
+# (which, unlike the queue endpoint, reports local files correctly via
+# is_local). The guest/admin "Now playing" reads this instead of the queue's
+# currently_playing field, so local media no longer shows the next Spotify song.
+KEY_NOW_PLAYING = "now_playing"
 
 
 def _item_artist(item: dict) -> str:
@@ -81,6 +87,27 @@ def _item_artist(item: dict) -> str:
 def _item_image(item: dict) -> str:
     images = (item.get("album", {}) or {}).get("images", [])
     return images[-1]["url"] if images else ""
+
+
+def _now_playing_snapshot(item: dict) -> dict:
+    """Build the cached "currently playing" record from a /me/player item.
+
+    Local files carry is_local=True and usually still provide name/artists from
+    the file metadata; we fall back to neutral labels if they are missing.
+    """
+    is_local = bool(item.get("is_local"))
+    name = item.get("name") or ("Local playback" if is_local else "")
+    artist = _item_artist(item) or ("Local file" if is_local else "")
+    return {
+        "uri": item.get("uri"),
+        "name": name,
+        "artist": artist,
+        "album": (item.get("album", {}) or {}).get("name", ""),
+        "image_url": _item_image(item),
+        "track_id": item.get("id"),
+        "artist_ids": [a.get("id") for a in item.get("artists", []) if a.get("id")],
+        "is_local": is_local,
+    }
 
 
 async def _tick() -> None:
@@ -96,6 +123,8 @@ async def _tick() -> None:
 
     playback = await spotify_client.get_playback()
     if playback is None or not playback.get("is_playing"):
+        # Nothing playing -> clear the cached snapshot so stale info is not shown.
+        await asyncio.to_thread(db.kv_set, KEY_NOW_PLAYING, None)
         return
 
     item = playback.get("item") or {}
@@ -113,6 +142,11 @@ async def _tick() -> None:
         except Exception:  # noqa: BLE001
             logger.exception("Failed to skip blacklisted track")
         return  # do not log or feed on a blacklisted track
+
+    # --- cache what is genuinely playing now (correct for local files) ---
+    await asyncio.to_thread(
+        db.kv_set, KEY_NOW_PLAYING, {"track": _now_playing_snapshot(item), "ts": time.time()}
+    )
 
     # --- play-history logging (only with an active session) ---
     session_id = await asyncio.to_thread(db.current_session_id)

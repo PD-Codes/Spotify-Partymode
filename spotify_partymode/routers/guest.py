@@ -31,6 +31,37 @@ def _token_status(device_id: str) -> dict:
     }
 
 
+def _current_from_cache(blacklist) -> dict | None:
+    """Return the poller's cached 'now playing' if it is fresh, else None.
+
+    Correct for local media (the poller reads /me/player which reports local
+    files), and re-evaluates the blacklist flag against the current sets.
+    """
+    cached = db.kv_get(queue_manager.KEY_NOW_PLAYING)
+    if not cached:
+        return None
+    fresh_for = max(15, settings_store.get_poll_interval() * 3)
+    if time.time() - cached.get("ts", 0) > fresh_for:
+        return None  # poller idle (party off / playback stopped) -> let caller fall back
+    track = cached.get("track") or {}
+    blacklisted = False
+    if blacklist is not None:
+        blocked_tracks, blocked_artists = blacklist
+        tid = track.get("track_id")
+        aids = track.get("artist_ids", [])
+        blacklisted = bool(
+            (tid and tid in blocked_tracks) or any(a in blocked_artists for a in aids)
+        )
+    return {
+        "uri": track.get("uri"),
+        "name": track.get("name"),
+        "artist": track.get("artist"),
+        "album": track.get("album", ""),
+        "image_url": track.get("image_url", ""),
+        "blacklisted": blacklisted,
+    }
+
+
 @router.get("/state")
 async def get_state(_: str = GuestName, device_id: str = DeviceId) -> dict:
     """Return current track, the wish queue (with who added) and playlist upcoming."""
@@ -44,9 +75,13 @@ async def get_state(_: str = GuestName, device_id: str = DeviceId) -> dict:
             queue = {"currently_playing": None, "queue": []}
         # Load the blacklist once per request instead of one query per track.
         blacklist = _blacklist_sets() if party_on else None
-        cp = queue.get("currently_playing")
-        if cp:
-            current = _simplify(cp, blacklist)
+        # Prefer the poller's fresh snapshot (correct for local files); only fall
+        # back to the queue endpoint's currently_playing when it is stale/absent.
+        current = _current_from_cache(blacklist)
+        if current is None:
+            cp = queue.get("currently_playing")
+            if cp:
+                current = _simplify(cp, blacklist)
         upcoming = [_simplify(t, blacklist) for t in queue.get("queue", [])[:12]]
 
     current_uri = current["uri"] if current else None
