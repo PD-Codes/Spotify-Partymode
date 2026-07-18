@@ -351,6 +351,15 @@ def list_wishes(statuses: tuple[str, ...] = ("pending", "queued")) -> list[dict]
     return [dict(r) for r in rows]
 
 
+def is_track_in_queue(track_uri: str) -> bool:
+    """True if this exact track is already waiting in the queue (pending or queued)."""
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT 1 FROM wish WHERE track_uri = ? AND status IN ('pending', 'queued') LIMIT 1",
+            (track_uri,),
+        ).fetchone() is not None
+
+
 def next_pending_wish() -> Optional[dict]:
     """Return the first pending wish (lowest position), or None."""
     with get_conn() as conn:

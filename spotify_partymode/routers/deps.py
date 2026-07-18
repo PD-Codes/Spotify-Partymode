@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 import time
 
 from fastapi import Depends, HTTPException, Request, status
@@ -18,15 +19,18 @@ def get_guest_name(request: Request) -> str:
 
 
 def get_device_id(request: Request) -> str:
-    """Return the persistent per-browser device id (set by middleware).
+    """Return the persistent per-browser device id, stored in the session cookie.
 
-    This id lives in a long-lived cookie that survives logout, so it anchors
-    per-guest limits (skip tokens, blocks) to the browser rather than the
-    freely chosen display name.
+    Created once per browser and preserved across logout (see auth.logout), so
+    per-guest limits (skip/add tokens, blocks) stay anchored to the browser and
+    cannot be reset by logging out and re-joining under a new name. Living inside
+    the signed session cookie makes it reliable behind proxies / in in-app
+    browsers (no separate cookie to lose).
     """
-    device_id = getattr(request.state, "device_id", None)
+    device_id = request.session.get("device_id")
     if not device_id:
-        device_id = request.cookies.get("device_id") or "anon"
+        device_id = secrets.token_urlsafe(16)
+        request.session["device_id"] = device_id
     return device_id
 
 

@@ -55,6 +55,10 @@ def add_guest_wish(track: dict, added_by: str) -> int:
         raise WishRejected("Party mode is currently off.")
     if db.is_blacklisted(track["id"], track.get("artist_ids", [])):
         raise WishRejected("This track or artist is blocked.")
+    # Duplicate detection: the same song must not sit in the queue twice (several
+    # guests requesting it, or a double-tap) or it would get played repeatedly.
+    if db.is_track_in_queue(track["uri"]):
+        raise WishRejected("This song is already in the queue.")
     return db.add_wish(track, added_by)
 
 

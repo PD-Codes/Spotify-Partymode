@@ -235,8 +235,16 @@ def spotify_disconnect(request: Request) -> dict:
 
 @router.post("/logout")
 def logout(request: Request) -> dict:
-    """Clear the current session (guest or admin)."""
+    """Clear the current session (guest or admin), but KEEP the device id.
+
+    Preserving the device id across logout is what stops guests from resetting
+    their skip/add-token and block budgets by logging out and re-joining under a
+    new name.
+    """
+    device_id = request.session.get("device_id")
     request.session.clear()
+    if device_id:
+        request.session["device_id"] = device_id
     return {"ok": True}
 
 
