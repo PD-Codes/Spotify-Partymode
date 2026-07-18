@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS guest_token_usage (
     device_id   TEXT NOT NULL,          -- persistent per-browser id (survives logout)
     hour_bucket INTEGER NOT NULL,       -- floor(unix_time / 3600)
     skips_used  INTEGER NOT NULL DEFAULT 0,
+    adds_used   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (device_id, hour_bucket)
 );
 
@@ -124,6 +125,10 @@ def init_db() -> None:
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(wish)").fetchall()]
         if "session_id" not in cols:
             conn.execute("ALTER TABLE wish ADD COLUMN session_id INTEGER")
+        # Migration: add guest_token_usage.adds_used (add-a-song tokens).
+        tcols = [r["name"] for r in conn.execute("PRAGMA table_info(guest_token_usage)").fetchall()]
+        if tcols and "adds_used" not in tcols:
+            conn.execute("ALTER TABLE guest_token_usage ADD COLUMN adds_used INTEGER NOT NULL DEFAULT 0")
 
 
 # --- session helpers ---------------------------------------------------------
@@ -355,6 +360,66 @@ def next_pending_wish() -> Optional[dict]:
     return dict(row) if row else None
 
 
+def _served_counts() -> dict[str, int]:
+    """How many wishes each guest already had served (queued or played) this party.
+
+    Used to keep round-robin fair over time: a guest who was already served does
+    not jump back to the front just because their earlier wish left the pending
+    set. Rejected wishes do not count as served.
+    """
+    sid = current_session_id()
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT added_by, COUNT(*) AS c FROM wish WHERE status IN ('queued', 'played') "
+            "AND (session_id = ? OR (session_id IS NULL AND ? IS NULL)) GROUP BY added_by",
+            (sid, sid),
+        ).fetchall()
+    return {r["added_by"]: int(r["c"]) for r in rows}
+
+
+def _fair_order(pending: list[dict], served: dict[str, int]) -> list[dict]:
+    """Round-robin interleave pending wishes across guests (by added_by).
+
+    Each wish's effective rank = (wishes that guest was already served) + (its
+    index among that guest's pending wishes, oldest first). Sorting by that rank
+    gives: everyone's next-up song first, then everyone's one-after, etc. A guest
+    with many songs never blocks the others, and served guests wait their turn.
+    """
+    counts = dict(served)
+    annotated = []
+    for w in sorted(pending, key=lambda x: (x["created_at"], x["id"])):
+        rank = counts.get(w["added_by"], 0)
+        counts[w["added_by"]] = rank + 1
+        annotated.append((rank, w["created_at"], w["id"], w))
+    annotated.sort(key=lambda t: (t[0], t[1], t[2]))
+    return [w for *_, w in annotated]
+
+
+def list_wishes_ordered(fair: bool) -> list[dict]:
+    """Wishes for display: queued first, then pending (fair round-robin or by position)."""
+    rows = list_wishes(("pending", "queued"))
+    queued = sorted((w for w in rows if w["status"] == "queued"), key=lambda w: w["position"])
+    pending = [w for w in rows if w["status"] == "pending"]
+    if fair:
+        pending = _fair_order(pending, _served_counts())
+    else:
+        pending.sort(key=lambda w: w["position"])
+    return queued + pending
+
+
+def next_pending_wish_ordered(fair: bool) -> Optional[dict]:
+    """Return the wish to feed next: fair round-robin winner, or lowest position."""
+    if not fair:
+        return next_pending_wish()
+    with get_conn() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM wish WHERE status = 'pending'"
+        ).fetchall()]
+    if not rows:
+        return None
+    return _fair_order(rows, _served_counts())[0]
+
+
 def set_wish_status(wish_id: int, status: str) -> None:
     with get_conn() as conn:
         conn.execute("UPDATE wish SET status = ? WHERE id = ?", (status, wish_id))
@@ -478,35 +543,39 @@ def is_blacklisted(track_id: str, artist_ids: list[str]) -> bool:
 # survives logout), so a guest cannot refill their budget by simply logging
 # out and re-joining under a new name.
 
-def get_guest_skips_used(device_id: str, hour_bucket: int) -> int:
-    """Return how many skip tokens this device already spent in the hour bucket."""
+# Token kinds map to their column in guest_token_usage.
+_TOKEN_COLUMNS = {"skip": "skips_used", "add": "adds_used"}
+
+
+def get_guest_tokens_used(device_id: str, hour_bucket: int, kind: str) -> int:
+    """Return how many tokens of `kind` this device already spent in the hour bucket."""
+    col = _TOKEN_COLUMNS[kind]
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT skips_used FROM guest_token_usage WHERE device_id = ? AND hour_bucket = ?",
+            f"SELECT {col} AS used FROM guest_token_usage WHERE device_id = ? AND hour_bucket = ?",
             (device_id, hour_bucket),
         ).fetchone()
-    return int(row["skips_used"]) if row else 0
+    return int(row["used"]) if row else 0
 
 
-def incr_guest_skip(device_id: str, hour_bucket: int) -> int:
-    """Record one spent skip token for this device in this hour; return new total.
+def incr_guest_token(device_id: str, hour_bucket: int, kind: str) -> int:
+    """Record one spent token of `kind` for this device this hour; return new total.
 
     Old buckets are pruned opportunistically so the table stays small.
     """
+    col = _TOKEN_COLUMNS[kind]
     with get_conn() as conn:
+        conn.execute("DELETE FROM guest_token_usage WHERE hour_bucket < ?", (hour_bucket,))
         conn.execute(
-            "DELETE FROM guest_token_usage WHERE hour_bucket < ?", (hour_bucket,)
-        )
-        conn.execute(
-            "INSERT INTO guest_token_usage (device_id, hour_bucket, skips_used) VALUES (?, ?, 1) "
-            "ON CONFLICT(device_id, hour_bucket) DO UPDATE SET skips_used = skips_used + 1",
+            f"INSERT INTO guest_token_usage (device_id, hour_bucket, {col}) VALUES (?, ?, 1) "
+            f"ON CONFLICT(device_id, hour_bucket) DO UPDATE SET {col} = {col} + 1",
             (device_id, hour_bucket),
         )
         row = conn.execute(
-            "SELECT skips_used FROM guest_token_usage WHERE device_id = ? AND hour_bucket = ?",
+            f"SELECT {col} AS used FROM guest_token_usage WHERE device_id = ? AND hour_bucket = ?",
             (device_id, hour_bucket),
         ).fetchone()
-    return int(row["skips_used"]) if row else 1
+    return int(row["used"]) if row else 1
 
 
 # --- guest blocks ------------------------------------------------------------

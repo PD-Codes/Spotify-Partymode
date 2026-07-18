@@ -64,6 +64,20 @@
       </div>
     </div>
 
+    <!-- Fair play order -->
+    <div class="card">
+      <div class="row between">
+        <div>
+          <h2>Fair play order</h2>
+          <p class="muted small">Round-robin across guests so someone who adds many songs can't make everyone else wait. Off = strict order (you can reorder manually).</p>
+        </div>
+        <label class="switch">
+          <input id="fair-toggle" type="checkbox" />
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+
     <!-- Guest guide -->
     <div class="card">
       <div class="row between">
@@ -103,7 +117,7 @@
     <!-- Wish queue -->
     <div class="card">
       <h2>Wish queue</h2>
-      <p class="muted small">Use the arrows to reorder pending wishes, ✕ to reject.</p>
+      <p class="muted small">✕ rejects a wish. Arrows reorder pending wishes in manual mode; with fair play order on, the order is automatic.</p>
       <ul id="wish-admin" class="track-list"></ul>
       <p id="wish-empty" class="muted small">No wishes pending.</p>
     </div>
@@ -205,6 +219,9 @@
         </label>
         <label class="field">Skip tokens per guest & hour
           <input id="set-skip-tokens" type="number" min="0" />
+        </label>
+        <label class="field">Add-a-song tokens per guest & hour
+          <input id="set-add-tokens" type="number" min="0" />
         </label>
         <label class="field">Max blocked artists per guest (per party)
           <input id="set-block-artists" type="number" min="0" />

@@ -152,7 +152,8 @@ async def _tick() -> None:
         marker = {"uri": current_uri, "fed": False}  # new track instance
 
     if not marker["fed"] and 0 < remaining_ms <= lead_ms:
-        nxt = await asyncio.to_thread(db.next_pending_wish)
+        fair = await asyncio.to_thread(settings_store.is_fair_queue)
+        nxt = await asyncio.to_thread(db.next_pending_wish_ordered, fair)
         if nxt is not None:
             try:
                 await spotify_client.add_to_queue(nxt["track_uri"])

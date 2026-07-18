@@ -27,8 +27,10 @@ def get_settings() -> dict:
         "insert_lead_seconds": settings_store.get_insert_lead(),
         "registration_open": settings_store.is_registration_open(),
         "skip_tokens_per_hour": settings_store.get_skip_tokens_per_hour(),
+        "add_tokens_per_hour": settings_store.get_add_tokens_per_hour(),
         "guest_block_artists_max": settings_store.get_guest_block_artists_max(),
         "guest_block_tracks_max": settings_store.get_guest_block_tracks_max(),
+        "fair_queue": settings_store.is_fair_queue(),
         "spotify_connected": spotify_client.is_admin_authenticated(),
     }
 
@@ -42,8 +44,10 @@ class SettingsBody(BaseModel):
     insert_lead_seconds: int | None = None
     registration_open: bool | None = None
     skip_tokens_per_hour: int | None = None
+    add_tokens_per_hour: int | None = None
     guest_block_artists_max: int | None = None
     guest_block_tracks_max: int | None = None
+    fair_queue: bool | None = None
 
 
 @router.post("/settings")
@@ -65,6 +69,10 @@ def update_settings(body: SettingsBody) -> dict:
         settings_store.set(settings_store.REGISTRATION_OPEN, bool(body.registration_open))
     if body.skip_tokens_per_hour is not None:
         settings_store.set(settings_store.SKIP_TOKENS_PER_HOUR, max(0, int(body.skip_tokens_per_hour)))
+    if body.add_tokens_per_hour is not None:
+        settings_store.set(settings_store.ADD_TOKENS_PER_HOUR, max(0, int(body.add_tokens_per_hour)))
+    if body.fair_queue is not None:
+        settings_store.set(settings_store.FAIR_QUEUE, bool(body.fair_queue))
     if body.guest_block_artists_max is not None:
         settings_store.set(
             settings_store.GUEST_BLOCK_ARTISTS_MAX, max(0, int(body.guest_block_artists_max))

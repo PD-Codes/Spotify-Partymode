@@ -14,15 +14,19 @@ router = APIRouter(prefix="/api", tags=["guest"])
 
 
 def _hour_bucket() -> int:
-    """Current whole-hour bucket used to refill skip tokens."""
+    """Current whole-hour bucket used to refill hourly tokens."""
     return int(time.time() // 3600)
 
 
-def _token_status(device_id: str) -> dict:
-    """Skip-token budget for a device in the current hour."""
-    maximum = settings_store.get_skip_tokens_per_hour()
+def _token_status(device_id: str, kind: str) -> dict:
+    """Hourly token budget for a device: kind is 'skip' or 'add'."""
+    maximum = (
+        settings_store.get_skip_tokens_per_hour()
+        if kind == "skip"
+        else settings_store.get_add_tokens_per_hour()
+    )
     bucket = _hour_bucket()
-    used = db.get_guest_skips_used(device_id, bucket)
+    used = db.get_guest_tokens_used(device_id, bucket, kind)
     return {
         "max": maximum,
         "used": used,
@@ -133,7 +137,7 @@ async def get_state(_: str = GuestName, device_id: str = DeviceId) -> dict:
             # A queued wish whose track is the one playing right now.
             "is_current": bool(current_uri and w["track_uri"] == current_uri),
         }
-        for w in db.list_wishes()
+        for w in db.list_wishes_ordered(settings_store.is_fair_queue())
     ]
     session = db.get_session(db.current_session_id()) if db.current_session_id() else None
     return {
@@ -143,7 +147,9 @@ async def get_state(_: str = GuestName, device_id: str = DeviceId) -> dict:
         "wishes": wishes,
         "upcoming": upcoming,
         "session": {"id": session["id"], "name": session["name"]} if session else None,
-        "tokens": _token_status(device_id),
+        "tokens": _token_status(device_id, "skip"),
+        "add_tokens": _token_status(device_id, "add"),
+        "fair_queue": settings_store.is_fair_queue(),
     }
 
 
@@ -208,12 +214,15 @@ async def search(
     return {"results": results, "type": "track"}
 
 
-# --- skip tokens -------------------------------------------------------------
+# --- hourly tokens (skip / add) ----------------------------------------------
 
 @router.get("/tokens")
 def get_tokens(_: str = GuestName, device_id: str = DeviceId) -> dict:
-    """Return the guest's current skip-token budget."""
-    return {"tokens": _token_status(device_id)}
+    """Return the guest's current skip- and add-token budgets."""
+    return {
+        "tokens": _token_status(device_id, "skip"),
+        "add_tokens": _token_status(device_id, "add"),
+    }
 
 
 @router.post("/skip")
@@ -225,7 +234,7 @@ async def guest_skip(_: str = GuestName, device_id: str = DeviceId) -> dict:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Admin is not connected to Spotify.")
     maximum = settings_store.get_skip_tokens_per_hour()
     bucket = _hour_bucket()
-    if db.get_guest_skips_used(device_id, bucket) >= maximum:
+    if db.get_guest_tokens_used(device_id, bucket, "skip") >= maximum:
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
             "No skip tokens left — they refill at the next full hour.",
@@ -237,8 +246,8 @@ async def guest_skip(_: str = GuestName, device_id: str = DeviceId) -> dict:
             status.HTTP_502_BAD_GATEWAY, "Could not skip right now. Please try again."
         ) from exc
     # Charge the token only after the skip actually succeeded.
-    db.incr_guest_skip(device_id, bucket)
-    return {"ok": True, "tokens": _token_status(device_id)}
+    db.incr_guest_token(device_id, bucket, "skip")
+    return {"ok": True, "tokens": _token_status(device_id, "skip")}
 
 
 # --- personal blocks ---------------------------------------------------------
@@ -310,13 +319,22 @@ class WishBody(BaseModel):
 
 
 @router.post("/wish")
-async def add_wish(body: WishBody, guest_name: str = GuestName) -> dict:
-    """Add a track to the wish queue."""
+async def add_wish(body: WishBody, guest_name: str = GuestName, device_id: str = DeviceId) -> dict:
+    """Add a track to the wish queue (costs one add-token)."""
+    maximum = settings_store.get_add_tokens_per_hour()
+    bucket = _hour_bucket()
+    if db.get_guest_tokens_used(device_id, bucket, "add") >= maximum:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "No add tokens left — they refill at the next full hour.",
+        )
     try:
         wish_id = queue_manager.add_guest_wish(body.model_dump(), guest_name)
     except queue_manager.WishRejected as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-    return {"ok": True, "wish_id": wish_id}
+    # Charge the token only after the wish was actually accepted.
+    db.incr_guest_token(device_id, bucket, "add")
+    return {"ok": True, "wish_id": wish_id, "add_tokens": _token_status(device_id, "add")}
 
 
 def _blacklist_sets() -> tuple[set[str], set[str]]:

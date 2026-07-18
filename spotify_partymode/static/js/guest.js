@@ -168,11 +168,22 @@ async function refresh() {
 
   renderNowPlaying(state.current);
   renderTokens(state);
+  renderAddTokens(state.add_tokens);
   renderWishes(state.wishes);
   renderUpcoming(state.upcoming);
   loadHistory();
   loadPlayHistory();
   loadBlocks();
+}
+
+// --- add-a-song tokens ---
+function renderAddTokens(t) {
+  const info = $("#add-token-info");
+  if (!info) return;
+  t = t || { max: 0, remaining: 0 };
+  info.textContent = t.max
+    ? `Add tokens: ${t.remaining}/${t.max} left this hour`
+    : "Adding songs is disabled by the host.";
 }
 
 // --- skip tokens ---

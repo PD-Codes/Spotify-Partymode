@@ -177,6 +177,17 @@ $("#party-toggle").addEventListener("change", async (e) => {
   } catch (err) { toast(err.message); }
 });
 
+// --- fair play order toggle ---
+let fairQueue = false;
+$("#fair-toggle").addEventListener("change", async (e) => {
+  fairQueue = e.target.checked;
+  try {
+    await api("/api/admin/settings", { method: "POST", body: JSON.stringify({ fair_queue: fairQueue }) });
+    toast(fairQueue ? "Fair play order on" : "Fair play order off");
+    refresh();
+  } catch (err) { toast(err.message); }
+});
+
 // --- playlist ---
 $("#playlist-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -213,12 +224,15 @@ async function loadSettings() {
   $("#set-poll").value = s.poll_interval_seconds || 4;
   $("#set-lead").value = s.insert_lead_seconds || 20;
   $("#set-skip-tokens").value = s.skip_tokens_per_hour ?? 3;
+  $("#set-add-tokens").value = s.add_tokens_per_hour ?? 5;
   $("#set-block-artists").value = s.guest_block_artists_max ?? 3;
   $("#set-block-tracks").value = s.guest_block_tracks_max ?? 5;
   $("#secret-hint").textContent = s.spotify_client_secret_set ? "(stored)" : "(not set)";
   if (!$("#playlist-input").value && s.default_playlist) $("#playlist-input").value = s.default_playlist;
   $("#reg-toggle").checked = !!s.registration_open;
   setRegLabel(!!s.registration_open);
+  fairQueue = !!s.fair_queue;
+  $("#fair-toggle").checked = fairQueue;
   renderSpotify(s.spotify_connected);
 }
 
@@ -231,6 +245,7 @@ $("#settings-form").addEventListener("submit", async (e) => {
     poll_interval_seconds: parseInt($("#set-poll").value, 10) || 4,
     insert_lead_seconds: parseInt($("#set-lead").value, 10) || 20,
     skip_tokens_per_hour: Math.max(0, parseInt($("#set-skip-tokens").value, 10) || 0),
+    add_tokens_per_hour: Math.max(0, parseInt($("#set-add-tokens").value, 10) || 0),
     guest_block_artists_max: Math.max(0, parseInt($("#set-block-artists").value, 10) || 0),
     guest_block_tracks_max: Math.max(0, parseInt($("#set-block-tracks").value, 10) || 0),
   };
@@ -247,6 +262,10 @@ async function refresh() {
   let state;
   try { state = await api("/api/state"); } catch { return; }
   $("#party-toggle").checked = state.party_on;
+  if (typeof state.fair_queue === "boolean") {
+    fairQueue = state.fair_queue;
+    $("#fair-toggle").checked = fairQueue;
+  }
   renderNowPlaying(state.current);
   renderWishAdmin(state.wishes);
   if ($("#session-status")) {
@@ -293,11 +312,17 @@ function renderWishAdmin(wishes) {
       <div class="actions">${badge}</div>`;
     const actions = li.querySelector(".actions");
     if (isPending) {
-      const up = iconBtn("↑", () => move(pendingIds, w.id, -1));
-      const down = iconBtn("↓", () => move(pendingIds, w.id, +1));
+      // In fair-play mode the order is computed round-robin, so manual
+      // reordering arrows would have no effect -> only show the reject button.
       const reject = iconBtn("✕", () => rejectWish(w.id));
       reject.classList.add("ghost");
-      actions.append(up, down, reject);
+      if (fairQueue) {
+        actions.append(reject);
+      } else {
+        const up = iconBtn("↑", () => move(pendingIds, w.id, -1));
+        const down = iconBtn("↓", () => move(pendingIds, w.id, +1));
+        actions.append(up, down, reject);
+      }
     }
     ul.appendChild(li);
   });

@@ -21,9 +21,14 @@ REGISTRATION_OPEN = "registration_open"
 INSERT_LEAD = "insert_lead_seconds"
 # Number of skip tokens each guest gets per hour (reset every full hour).
 SKIP_TOKENS_PER_HOUR = "skip_tokens_per_hour"
+# Number of add-a-song tokens each guest gets per hour (reset every full hour).
+ADD_TOKENS_PER_HOUR = "add_tokens_per_hour"
 # How many artists / individual tracks a single guest may block per party.
 GUEST_BLOCK_ARTISTS_MAX = "guest_block_artists_max"
 GUEST_BLOCK_TRACKS_MAX = "guest_block_tracks_max"
+# Fair play order: interleave pending wishes round-robin across guests so a
+# guest who adds many songs cannot make everyone else wait.
+FAIR_QUEUE = "fair_queue"
 
 _DEFAULTS = {
     SPOTIFY_CLIENT_ID: "",
@@ -36,8 +41,10 @@ _DEFAULTS = {
     REGISTRATION_OPEN: False,
     INSERT_LEAD: 20,
     SKIP_TOKENS_PER_HOUR: 3,
+    ADD_TOKENS_PER_HOUR: 5,
     GUEST_BLOCK_ARTISTS_MAX: 3,
     GUEST_BLOCK_TRACKS_MAX: 5,
+    FAIR_QUEUE: False,
 }
 
 
@@ -101,6 +108,18 @@ def get_skip_tokens_per_hour() -> int:
         return max(0, int(get(SKIP_TOKENS_PER_HOUR)))
     except (TypeError, ValueError):
         return 3
+
+
+def get_add_tokens_per_hour() -> int:
+    """Add-a-song tokens granted to each guest, refilled every full hour."""
+    try:
+        return max(0, int(get(ADD_TOKENS_PER_HOUR)))
+    except (TypeError, ValueError):
+        return 5
+
+
+def is_fair_queue() -> bool:
+    return bool(get(FAIR_QUEUE))
 
 
 def get_guest_block_artists_max() -> int:
