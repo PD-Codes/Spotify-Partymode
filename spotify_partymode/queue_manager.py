@@ -105,6 +105,29 @@ async def _tick() -> None:
     duration_ms = item.get("duration_ms")
     progress_ms = playback.get("progress_ms")
 
+    # --- reconcile: drop 'queued' wishes that vanished from Spotify's queue ---
+    # A wish we fed becomes 'queued'. Normally it later plays and is marked done.
+    # But if it is skipped/passed BEFORE it ever becomes the current track (a
+    # skip token, a blacklist skip, a manual next), it never gets cleaned up and
+    # lingers as "next" forever. Here we mark any queued wish that is neither
+    # playing now nor still in Spotify's up-next list as done. Runs before the
+    # feed step below, so a wish fed this very tick is never affected.
+    try:
+        sp_queue = await spotify_client.get_queue()
+    except Exception:  # noqa: BLE001 - transient; just skip reconciliation this tick
+        sp_queue = None
+    if sp_queue is not None:
+        live = {t.get("uri") for t in sp_queue.get("queue", []) if t.get("uri")}
+        if current_uri:
+            live.add(current_uri)
+        for w in await asyncio.to_thread(db.list_wishes, ("queued",)):
+            if w["track_uri"] not in live:
+                await asyncio.to_thread(db.set_wish_status, w["id"], "played")
+                cw = await asyncio.to_thread(db.kv_get, KEY_CURRENT_WISH)
+                if cw and cw.get("id") == w["id"]:
+                    await asyncio.to_thread(db.kv_set, KEY_CURRENT_WISH, None)
+                logger.info("Reconciled queued wish '%s' (left Spotify queue)", w["track_name"])
+
     # --- blacklist skip (party mode only, which is guaranteed above) ---
     if track_id and await asyncio.to_thread(db.is_blacklisted, track_id, artist_ids):
         try:

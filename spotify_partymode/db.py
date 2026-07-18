@@ -380,18 +380,33 @@ def _served_counts() -> dict[str, int]:
 def _fair_order(pending: list[dict], served: dict[str, int]) -> list[dict]:
     """Round-robin interleave pending wishes across guests (by added_by).
 
-    Each wish's effective rank = (wishes that guest was already served) + (its
-    index among that guest's pending wishes, oldest first). Sorting by that rank
-    gives: everyone's next-up song first, then everyone's one-after, etc. A guest
-    with many songs never blocks the others, and served guests wait their turn.
+    One song from each guest per round, then the next round, and so on:
+        round 1: A B C D   (everyone's 1st pending song)
+        round 2: A B D     (C already ran out)
+        round 3: A B       (D ran out) ...  then the heavy contributor's tail.
+    A guest with many songs never blocks the others (everyone gets a turn each
+    round), and the surplus of a heavy contributor naturally trails at the end.
+
+    The round of a wish is purely its index among that guest's *pending* songs
+    (oldest first) -- NOT counting how many that guest already had played. Songs
+    already played only act as a TIE-BREAKER within a round: when several guests
+    have a song in the same round, the one served least so far goes first. This
+    keeps two properties at once:
+      * a guest who added a lot early is NOT shoved to the very back later just
+        because several of their songs already played (they stay in the normal
+        round rotation);
+      * nobody waits forever -- within each round the least-served guest leads,
+        so a light guest is not perpetually edged out by an earlier submitter.
+    Fully deterministic -> the order stays stable between polls (no jitter).
     """
-    counts = dict(served)
+    seen: dict[str, int] = {}
     annotated = []
     for w in sorted(pending, key=lambda x: (x["created_at"], x["id"])):
-        rank = counts.get(w["added_by"], 0)
-        counts[w["added_by"]] = rank + 1
-        annotated.append((rank, w["created_at"], w["id"], w))
-    annotated.sort(key=lambda t: (t[0], t[1], t[2]))
+        idx = seen.get(w["added_by"], 0)
+        seen[w["added_by"]] = idx + 1
+        annotated.append((idx, served.get(w["added_by"], 0), w["created_at"], w["id"], w))
+    # Sort by: round index, then fewest already served, then submission order.
+    annotated.sort(key=lambda t: (t[0], t[1], t[2], t[3]))
     return [w for *_, w in annotated]
 
 
